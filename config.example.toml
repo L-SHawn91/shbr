@@ -1,0 +1,36 @@
+# shbr configuration — copy to ~/.config/shbr/config.toml (or point $SHBR_CONFIG at it).
+#
+# Anything omitted here inherits the built-in defaults, which enable only the
+# generic, public sources:
+#   * agentcat      — used automatically IF the `agentcat` binary is on PATH
+#   * claude_memory — Claude Code persistent-memory files
+#
+# Values below are merged over those defaults at the source level, so you only
+# list what you want to change.
+
+# Where shbr keeps its append-only event log + memory-diff baseline.
+# Default: ~/.local/state/shbr
+# state_dir = "~/.local/state/shbr"
+
+# Optional: seed the state dir once from a previous install (preserves the
+# memory-diff baseline so the first scan doesn't report everything as "created").
+# migrate_from = "~/.local/state/old-tool"
+
+# ---- generic sources (already on by default; shown for reference) ----------
+
+[sources.agentcat]
+enabled = true
+# bin = "agentcat"          # override if installed under a different name/path
+
+[sources.claude_memory]
+enabled = true
+# glob = "~/.claude/projects/*/memory/*.md"
+
+# ---- opt-in: a private / vendor-specific agent runtime ---------------------
+# Example adapter for a local SQLite-backed agent runtime ("hermes"). Disabled
+# by default; enable it only where that runtime exists.
+
+# [sources.hermes]
+# enabled = true
+# db = "~/.hermes/state.db"                 # opened strictly read-only
+# memory_glob = "~/.hermes/memories/*.md"

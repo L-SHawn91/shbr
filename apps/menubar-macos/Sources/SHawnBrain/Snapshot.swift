@@ -123,6 +123,37 @@ struct AgentMeter: Decodable {
         // false and are collapsed behind a disclosure. Absent (claude/codex) is
         // treated as primary so those providers show every quota as before.
         var primary: Bool?
+        // Reset instant the bucket refills, normalized to a Unix epoch. The
+        // wire type varies by connector: gemini emits an ISO-8601 string,
+        // codex a numeric epoch — decode accepts either. `tokenType` is what
+        // the quota counts ("REQUESTS", "TOKENS"); gemini exposes it, others omit.
+        var resetsAtEpoch: Double?
+        var tokenType: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, window, remainingPercent, usedPercent, primary
+            case resetsAt = "resets_at"
+            case tokenType
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decodeIfPresent(String.self, forKey: .id)
+            window = try c.decodeIfPresent(String.self, forKey: .window)
+            remainingPercent = try c.decodeIfPresent(Double.self, forKey: .remainingPercent)
+            usedPercent = try c.decodeIfPresent(Double.self, forKey: .usedPercent)
+            primary = try c.decodeIfPresent(Bool.self, forKey: .primary)
+            tokenType = try c.decodeIfPresent(String.self, forKey: .tokenType)
+            // resets_at is either a numeric epoch (codex) or an ISO-8601
+            // string (gemini). Normalize both to a Unix epoch.
+            if let n = try? c.decodeIfPresent(Double.self, forKey: .resetsAt) {
+                resetsAtEpoch = n
+            } else if let s = try? c.decodeIfPresent(String.self, forKey: .resetsAt) {
+                let f = ISO8601DateFormatter()
+                f.formatOptions = [.withInternetDateTime]
+                resetsAtEpoch = f.date(from: s)?.timeIntervalSince1970
+            }
+        }
     }
 }
 

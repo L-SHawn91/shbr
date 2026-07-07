@@ -243,10 +243,15 @@ struct ContentView: View {
 
     private func quotaRow(_ q: AgentMeter.Quota) -> some View {
         let rem = q.remainingPercent ?? 0
+        // Drop the redundant "gemini-" prefix so the model tag stays legible in
+        // the narrow dashboard column; claude/codex windows ("5h") are untouched.
+        let label = (q.window ?? q.id ?? "quota")
+            .replacingOccurrences(of: "gemini-", with: "")
         return HStack(spacing: 8) {
-            Text(q.window ?? q.id ?? "quota")
+            Text(label)
                 .font(.caption2.monospaced()).foregroundStyle(.secondary)
-                .frame(width: 32, alignment: .leading)
+                .lineLimit(1).truncationMode(.middle)
+                .frame(width: 84, alignment: .leading)
             StatBar(fraction: min(max(rem / 100, 0), 1), color: quotaColor(rem))
             Text("\(Int(rem.rounded()))%")
                 .font(.caption2.monospacedDigit()).foregroundStyle(quotaColor(rem))
@@ -453,20 +458,32 @@ struct ContentView: View {
     private func quotaDetailRow(_ q: AgentMeter.Quota) -> some View {
         let rem = q.remainingPercent ?? 0
         let used = q.usedPercent
+        // gemini repeats the model name in both id and window; show it once.
+        let name = q.id ?? q.window ?? "quota"
+        let sub = (q.window == name) ? nil : q.window
+        let reset = q.resetsAtEpoch.map { relTime($0) }
+        let unit = q.tokenType.map { $0 == "REQUESTS" ? "요청" : $0.lowercased() }
         return VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(q.id ?? q.window ?? "quota").font(.caption.weight(.medium))
+            HStack(alignment: .firstTextBaseline) {
+                Text(name).font(.caption.monospaced().weight(.medium))
+                    .lineLimit(1).truncationMode(.middle)
+                if let sub = sub {
+                    Text(sub).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                }
                 Spacer()
-                Text(q.window ?? "").font(.caption2.monospaced()).foregroundStyle(.secondary)
             }
             StatBar(fraction: min(max(rem / 100, 0), 1), color: quotaColor(rem))
-            HStack {
-                Text("\(Int(rem.rounded()))% remaining")
+            HStack(spacing: 6) {
+                Text("\(Int(rem.rounded()))% 남음")
                     .font(.caption2).foregroundStyle(quotaColor(rem))
-                Spacer()
                 if let u = used {
-                    Text("\(Int(u.rounded()))% used")
+                    Text("· \(Int(u.rounded()))% 사용")
                         .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let reset = reset {
+                    Text("\(unit.map { "\($0) · " } ?? "")리셋 \(reset)")
+                        .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
         }

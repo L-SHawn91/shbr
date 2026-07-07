@@ -2,8 +2,9 @@
 #
 # Anything omitted here inherits the built-in defaults, which enable only the
 # generic, public sources:
-#   * agentcat      — used automatically IF the `agentcat` binary is on PATH
+#   * usage         — native reader of each local agent's on-disk token ledger
 #   * claude_memory — Claude Code persistent-memory files
+#   * system        — host CPU / memory / temperature (stdlib + OS utilities)
 #
 # Values below are merged over those defaults at the source level, so you only
 # list what you want to change.
@@ -18,13 +19,39 @@
 
 # ---- generic sources (already on by default; shown for reference) ----------
 
-[sources.agentcat]
+[sources.usage]
 enabled = true
-# bin = "agentcat"          # override if installed under a different name/path
+# Screens every known local agent each run and surfaces only the ones with a
+# readable on-disk token ledger — an agent that isn't installed or leaves no
+# usage on disk is simply omitted (never shown as "not found"). Read-only.
+# codex_db     = "~/.codex/state_5.sqlite"      # opened mode=ro
+# claude_stats = "~/.claude/stats-cache.json"
+# gemini_dir   = "~/.gemini"                     # per-turn usageMetadata, if present
 
 [sources.claude_memory]
 enabled = true
 # glob = "~/.claude/projects/*/memory/*.md"
+
+[sources.system]
+enabled = true
+# Host resource observer — CPU utilisation + load, memory used/available,
+# and (best-effort) temperature. Read-only, no sudo, no third-party deps:
+# uses os.getloadavg / vm_stat / sysctl on macOS and /proc on Linux.
+#
+# Temperature needs a helper that can read the sensor without sudo. macOS has
+# no built-in one (powermetrics needs sudo). Install a no-sudo reader and shbr
+# picks it up automatically. On Apple Silicon use smctemp — note osx-cpu-temp
+# reports 0.0 on M-series and is skipped. smctemp is not in Homebrew core; build
+# it from source:
+#   git clone https://github.com/narugit/smctemp && make -C smctemp
+#   cp smctemp/smctemp ~/.local/bin/     # anywhere on PATH
+# To force a specific command that prints a °C number, set temp_cmd:
+# temp_cmd = "smctemp -c"       # or "istats cpu temp --value-only", "sensors -u" (Linux)
+#
+# Menu-bar glance (macOS): the native SHawn Brain app (apps/menubar-macos) shows
+# shbr in the menu bar (host meter + per-agent usage in one line) via `shbr menubar --json`.
+# `shbr menubar` without --json also emits SwiftBar/xbar plugin text as a dev
+# scaffold. See the "Menu bar" section of the README.
 
 # ---- opt-in: a private / vendor-specific agent runtime ---------------------
 # Example adapter for a local SQLite-backed agent runtime ("hermes"). Disabled

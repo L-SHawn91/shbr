@@ -23,8 +23,9 @@ CLAUDE_MEMORY_GLOB = "~/.claude/projects/*/memory/*.md"
 # Generic, ships-to-anyone defaults. No vendor-private runtime paths here.
 DEFAULTS = {
     "sources": {
-        "agentcat": {"enabled": True},  # gated on the `agentcat` binary existing
+        "usage": {"enabled": True},  # native local token reader (codex/claude on-disk state)
         "claude_memory": {"enabled": True, "glob": CLAUDE_MEMORY_GLOB},
+        "system": {"enabled": True},  # host CPU / memory / temperature observer
     },
 }
 

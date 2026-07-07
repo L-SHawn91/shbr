@@ -7,6 +7,9 @@ dist/
 venv/
 .pytest_cache/
 .DS_Store
+# Swift menu-bar app build artifacts
+apps/menubar-macos/.build/
+apps/menubar-macos/.swiftpm/
 # never commit a private deployment config
 config.toml
 config.local.toml

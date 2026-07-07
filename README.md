@@ -35,9 +35,44 @@ shbr memory        # persistent-memory file operations since last scan
 shbr sessions      # recent + active sessions
 shbr history -n 30 # recent recorded events
 shbr config        # show resolved config + which sources are active
+shbr menubar       # SwiftBar/xbar plugin output (glance line + dropdown)
 ```
 
 Add `--json` to any command for machine-readable output.
+
+## Menu bar (macOS)
+
+The always-on glance — `🧠 9% · 39° · 53%` (CPU · temp · RAM) — plus a dropdown
+with the full meter, per-agent usage/quota, and recent sessions. `shbr` itself
+stays a headless, read-only CLI: it only *emits* the data; a separate frontend
+draws the menu bar.
+
+**SHawn Brain app (recommended).** A self-contained native menu-bar app — no
+third-party host. It shells out to `shbr menubar --json` and renders the panel
+itself.
+
+```bash
+cd apps/menubar-macos
+swift build -c release
+.build/release/SHawnBrain          # menu-bar item appears; no dock icon
+```
+
+Requires `shbr` on your `PATH`. See [`apps/menubar-macos/README.md`](apps/menubar-macos/README.md)
+for the refresh-interval control and packaging notes.
+
+**SwiftBar plugin (dev scaffold).** `shbr menubar` (no `--json`) also prints
+[SwiftBar](https://swiftbar.app)/xbar plugin text, handy for a quick check
+without building the app:
+
+```bash
+brew install swiftbar
+mkdir -p ~/.config/swiftbar-plugins
+cp contrib/swiftbar/shbr.10s.sh ~/.config/swiftbar-plugins/   # or symlink
+```
+
+The filename sets the refresh interval (`shbr.10s.sh` = every 10s). For a
+snappier pure-resource meter, rename to `shbr.3s.sh` and use `shbr menubar
+--no-agents` (skips the agent-usage query — no subprocess/network call).
 
 ## Sources
 
@@ -45,8 +80,9 @@ Out of the box `shbr` auto-discovers only generic, public sources:
 
 | source          | provides                        | activation                          |
 |-----------------|---------------------------------|-------------------------------------|
-| `agentcat`      | per-provider token & quota usage | used automatically if `agentcat` is on `PATH` |
+| `usage`         | per-agent token usage, read straight from each local agent's on-disk ledger | on by default; screens all known agents, shows only the active ones |
 | `claude_memory` | Claude Code memory-file ops      | on by default                       |
+| `system`        | host CPU / memory / temperature  | on by default (stdlib + OS utilities) |
 
 Everything else is opt-in. See [`config.example.toml`](config.example.toml) for
 how to point `shbr` at additional runtimes (the shipped example includes a

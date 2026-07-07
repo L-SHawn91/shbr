@@ -21,6 +21,61 @@ def build_meter(sources) -> list:
     return out
 
 
+def apply_connectors(meters: list, connectors, cache=None) -> list:
+    """Merge opt-in connectors' live quota into the providers meter, in place.
+
+    A connector returns the remaining-quota a local file cannot hold (see
+    ``connectors.py``). Each result is ``{"name", "quotas", ...}``; its quotas
+    land in ``providers[name]["quotas"]`` so they flow through the same render
+    path (text + JSON) as any locally-read provider. If no providers meter
+    exists yet (e.g. the local usage source is off), one is synthesised so the
+    live quota still shows. Fail-silent: a dead connector is a non-event.
+
+    ``cache`` (a ``cache.ConnectorCache``, optional) short-circuits the network:
+    a result younger than the TTL is served from disk without a fetch, a fresh
+    fetch is written back, and a failed fetch falls back to the last cached value
+    so the menu bar holds its last-known quota instead of blanking.
+    """
+    if not connectors:
+        return meters
+    results = []
+    for c in connectors:
+        name = getattr(c, "name", None)
+        if cache is not None and name:
+            hit = cache.fresh(name)
+            if hit is not None:
+                results.append(hit)
+                continue
+        try:
+            r = c.fetch()
+        except Exception:
+            r = None
+        if r and r.get("name"):
+            if cache is not None and name:
+                cache.put(name, r)
+            results.append(r)
+        elif cache is not None and name:
+            stale = cache.stale(name)
+            if stale:
+                results.append(stale)
+    if not results:
+        return meters
+    provm = next((m for m in meters if m.get("kind") == "providers"), None)
+    if provm is None:
+        provm = {"kind": "providers", "source": "connectors",
+                 "providers": {}, "memory_bytes": {}, "process_count": None}
+        meters.append(provm)
+    provs = provm.setdefault("providers", {})
+    for r in results:
+        p = provs.setdefault(r["name"], {"status": None, "today": None,
+                                         "week": None, "month": None,
+                                         "all": None, "quotas": []})
+        p.setdefault("quotas", []).extend(r.get("quotas") or [])
+        if r.get("status") and not p.get("status"):
+            p["status"] = r["status"]
+    return meters
+
+
 def _render_providers(m: list, lines: list) -> None:
     src = m.get("source", "providers")
     lines.append(f"[meter · {src} — CLI providers]")
@@ -65,6 +120,29 @@ def _render_aggregate(m: list, lines: list) -> None:
         lines.append(f"  top models: {top}")
 
 
+def _render_system(m: list, lines: list) -> None:
+    src = m.get("source", "system")
+    lines.append(f"[meter · {src} — host resources]")
+    cpu = m.get("cpu") or {}
+    util = cpu.get("util_pct")
+    util_s = f"{util:.0f}%" if util is not None else "n/a"
+    load = [cpu.get("load1"), cpu.get("load5"), cpu.get("load15")]
+    load_s = "/".join(f"{x:.2f}" if x is not None else "?" for x in load)
+    lines.append(f"  CPU: {util_s} used   load {load_s}   ({cpu.get('ncpu','?')} cores)")
+    mem = m.get("memory") or {}
+    if mem:
+        used, total = mem.get("used"), mem.get("total")
+        pct = mem.get("used_pct")
+        pct_s = f" ({pct:.0f}%)" if pct is not None else ""
+        if used is not None and total:
+            lines.append(f"  RAM: {fmt_bytes(used)} / {fmt_bytes(total)} used{pct_s}   "
+                         f"avail {fmt_bytes(mem.get('available') or 0)}")
+        elif total:
+            lines.append(f"  RAM: {fmt_bytes(total)} total")
+    temp = m.get("temperature_c")
+    lines.append(f"  TEMP: {temp:.1f}°C" if temp is not None else "  TEMP: n/a")
+
+
 def render_meter(meters: list) -> list:
     lines: list = []
     if not meters:
@@ -74,6 +152,136 @@ def render_meter(meters: list) -> list:
             _render_providers(m, lines)
         elif m.get("kind") == "aggregate":
             _render_aggregate(m, lines)
+        elif m.get("kind") == "system":
+            _render_system(m, lines)
+    return lines
+
+
+# ---------------------------------------------------------------- menubar
+# SwiftBar / xbar plugin protocol: the first line(s) render in the menu bar,
+# a "---" separator introduces the dropdown, and "key=value" params after a
+# trailing " | " style each dropdown row. This gives shbr a RunCat-style
+# always-on glance without any GUI code — a host app polls `shbr menubar`.
+
+def _glance(sysm: dict | None) -> dict:
+    """Structured menu-bar glance: the few numbers shown always-on.
+
+    alert is a severity level ("crit" / "warn" / None) rather than a colour, so
+    each frontend (SwiftBar text, native app) maps it to its own styling.
+    """
+    if not sysm:
+        return {"cpu_pct": None, "temp_c": None, "mem_pct": None, "alert": None}
+    cpu = (sysm.get("cpu") or {}).get("util_pct")
+    temp = sysm.get("temperature_c")
+    mem = (sysm.get("memory") or {}).get("used_pct")
+    # temp and cpu share no scale, but either running hot is worth flagging
+    alert = None
+    if (cpu is not None and cpu >= 90) or (temp is not None and temp >= 90):
+        alert = "crit"
+    elif (cpu is not None and cpu >= 70) or (temp is not None and temp >= 80):
+        alert = "warn"
+    return {"cpu_pct": cpu, "temp_c": temp, "mem_pct": mem, "alert": alert}
+
+
+_ALERT_COLOR = {"crit": "red", "warn": "#e0a000"}
+
+
+def _menubar_title(sysm: dict | None):
+    """(title, alert_color) for the always-visible SwiftBar menu-bar line."""
+    g = _glance(sysm)
+    if g["cpu_pct"] is None and g["temp_c"] is None and g["mem_pct"] is None:
+        return "🧠 shbr", None
+    bits = [f"{g['cpu_pct']:.0f}%" if g["cpu_pct"] is not None else "–%"]
+    if g["temp_c"] is not None:
+        bits.append(f"{g['temp_c']:.0f}°")
+    if g["mem_pct"] is not None:
+        bits.append(f"{g['mem_pct']:.0f}%")
+    return "🧠 " + " · ".join(bits), _ALERT_COLOR.get(g["alert"])
+
+
+def _memory_block(inv: dict | None) -> dict:
+    """Per-source memory metadata for the drill-down view — counts, byte totals,
+    and the file list (path/name/size/mtime). Metadata only; no file *content*
+    ever leaves the core (the frontend reads the user's own files on demand)."""
+    out: dict = {}
+    for label, files in (inv or {}).items():
+        items = sorted(
+            (
+                {
+                    "path": fp,
+                    "name": os.path.basename(fp),
+                    "size": meta["size"],
+                    "mtime": meta["mtime"],
+                }
+                for fp, meta in files.items()
+            ),
+            key=lambda x: x["mtime"],
+            reverse=True,
+        )
+        out[label] = {
+            "files": len(files),
+            "bytes": sum(f["size"] for f in files.values()),
+            "items": items,
+        }
+    return out
+
+
+def menubar_data(meters: list, sessions: list, memory_inv: dict | None = None) -> dict:
+    """Structured menu-bar payload — the contract a native frontend consumes.
+
+    Same information the SwiftBar text view renders, but as data: a glance line,
+    the raw system meter, the agent-usage meters, a trimmed session list, and
+    (for the drill-down detail view) per-source memory-file metadata.
+    """
+    sysm = next((m for m in meters if m.get("kind") == "system"), None)
+    agents = [m for m in meters if m.get("kind") != "system"]
+    sess = [
+        {
+            "active": bool(s.get("active")),
+            "source": s.get("source"),
+            "model": s.get("model"),
+            "tokens": s.get("tokens"),
+            "cwd": s.get("cwd"),
+            "started_at": s.get("started_at"),
+        }
+        for s in sessions[:8]
+    ]
+    return {
+        "glance": _glance(sysm),
+        "system": sysm,
+        "agents": agents,
+        "sessions": sess,
+        "memory": _memory_block(memory_inv),
+        "session_count": len(sessions),
+        "active_count": sum(1 for s in sessions if s.get("active")),
+        "ts": round(now(), 3),
+    }
+
+
+def render_menubar(meters: list, sessions: list) -> list:
+    sysm = next((m for m in meters if m.get("kind") == "system"), None)
+    title, alert = _menubar_title(sysm)
+    lines = [f"{title} | color={alert}" if alert else title, "---"]
+
+    detail = render_meter(meters) or ["(no sources available)"]
+    for ln in detail:
+        lines.append(f"{ln} | font=Menlo size=12 trim=false")
+
+    active = [s for s in sessions if s.get("active")]
+    lines.append("---")
+    lines.append(
+        f"sessions (24h): {len(sessions)}   active: {len(active)} | font=Menlo size=12"
+    )
+    for s in sessions[:5]:
+        mark = "●" if s.get("active") else "○"
+        model = (s.get("model") or "?")[:20]
+        cwd = os.path.basename(s.get("cwd") or "") or "-"
+        lines.append(
+            f"{mark} {s.get('source','?')[:6]:6s} {model:20s} "
+            f"{fmt_tok(s.get('tokens')):>7}  {cwd} | font=Menlo size=12 trim=false"
+        )
+    lines.append("---")
+    lines.append("Refresh | refresh=true")
     return lines
 
 
@@ -173,8 +381,8 @@ def render_sessions(data: dict) -> list:
 
 
 # --------------------------------------------------------------- snapshot
-def build_snapshot(sources) -> dict:
-    meters = build_meter(sources)
+def build_snapshot(sources, connectors=(), cache=None) -> dict:
+    meters = apply_connectors(build_meter(sources), connectors, cache)
     inv = scan_memory(sources)
     sessions = build_sessions(sources, 24.0)
     return {

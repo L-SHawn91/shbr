@@ -40,11 +40,13 @@ provider with live quota, or adding a provider that has no local ledger at all.
 """
 from __future__ import annotations
 
+import base64
 import glob
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import urllib.error
 import urllib.parse
@@ -712,7 +714,30 @@ class GeminiConnector(Connector):
                 q["remaining"] = amt
                 q["limit"] = round(float(amt) / frac)
             out.append(q)
+        # Order newest-and-strongest first: generation descending (3.1 > 3 >
+        # 2.5), then reasoning tier descending (pro > flash > flash-lite), then
+        # stable before preview. The wire order is alphabetical, which buries
+        # the flagship models below older ones.
+        out.sort(key=lambda q: GeminiConnector._model_rank(q.get("id") or ""))
         return out
+
+    # Reasoning-strength ordering key. Lower tuple sorts first, so generation
+    # and tier are negated to put the newest, highest-reasoning model on top.
+    @staticmethod
+    def _model_rank(model: str) -> tuple:
+        m = model.lower()
+        gm = re.search(r"gemini-(\d+(?:\.\d+)?)", m)
+        gen = float(gm.group(1)) if gm else 0.0
+        if "pro" in m:
+            tier = 3
+        elif "flash-lite" in m:
+            tier = 1
+        elif "flash" in m:
+            tier = 2
+        else:
+            tier = 0
+        preview = 1 if "preview" in m else 0  # stable before preview
+        return (-gen, -tier, preview, model)
 
     # -- fetch --------------------------------------------------------------
     def fetch(self):
@@ -739,6 +764,177 @@ class GeminiConnector(Connector):
                 "quotas": quotas}
 
 
+class AntigravityConnector(GeminiConnector):
+    """Antigravity (Google's agentic IDE) remaining-quota reader.
+
+    Antigravity is a separate product from the plain Gemini CLI: it logs in with
+    its *own* Google account and draws on a *separate* free quota pool
+    (``auth_method: "consumer"``). It never writes to ``~/.gemini/tmp/*/chats``,
+    so shbr's local gemini usage source counts none of its activity, and its
+    quota is invisible to the gemini connector. This surfaces it as a distinct
+    ``antigravity`` provider row.
+
+    It reuses the entire Gemini Code Assist quota path (``:loadCodeAssist`` →
+    ``:retrieveUserQuota`` → per-model buckets) — only the credential differs.
+    Antigravity stores its OAuth token *nested* one level deeper than the plain
+    CLI: ``{"token": {access_token, refresh_token, expiry, ...},
+    "auth_method": ...}`` at ``~/.gemini/antigravity-cli/antigravity-oauth-token``.
+    ``_creds()`` unwraps that inner object into the flat shape the reused logic
+    expects. Same contract: OFF BY DEFAULT, double-gated on that file, read-only
+    over the wire, fail-silent, stdlib-only, refreshed token kept in memory only.
+
+    Note: like the gemini connector it holds no client id/secret, so an expired
+    access token triggers a bundle-scan refresh. If Antigravity's OAuth client
+    differs from the Gemini CLI's, that refresh may fail — in which case the read
+    fails silently (returns ``None``) until the IDE next refreshes the token
+    itself. A live (unexpired) access token needs no refresh and reads directly.
+    """
+
+    name = "antigravity"
+    tier = "official"
+    cred_paths = ("~/.gemini/antigravity-cli/antigravity-oauth-token",)
+
+    def _creds(self) -> dict:
+        for p in self.cfg.get("cred_paths") or self.cred_paths:
+            try:
+                with open(os.path.expanduser(p), encoding="utf-8") as f:
+                    d = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(d, dict):
+                continue
+            # Nested antigravity shape → unwrap; tolerate a flat shape too.
+            tok = d.get("token") if isinstance(d.get("token"), dict) else d
+            if isinstance(tok, dict) and tok.get("refresh_token"):
+                return tok
+        return {}
+
+
+class CursorConnector(Connector):
+    """Cursor subscription-consumption reader — the live "구독 소모량" the Cursor
+    dashboard shows, which no local file records.
+
+    GRAY tier: the endpoint (``/api/usage-summary``) is undocumented and was
+    confirmed by recon, not published by Cursor. It authenticates with the
+    session token the Cursor IDE already stored on this machine — the same
+    credential the app itself uses — and only ever issues a read GET. The token
+    is read from Cursor's local SQLite store into memory for the single request
+    and is never logged, written, or transmitted anywhere but back to Cursor.
+
+    Credential: ``cursorAuth/accessToken`` in the ``ItemTable`` of Cursor's
+    ``state.vscdb`` (opened strictly read-only). The token is a JWT whose ``sub``
+    (``provider|user_...``) yields the userId. Cursor's API takes cookie auth,
+    not bearer — the header is ``Cookie: WorkosCursorSessionToken=<uid>::<tok>``
+    (``::`` percent-encoded). Bearer auth 401s.
+
+    The response's ``individualUsage.plan.totalPercentUsed`` is Cursor's own
+    authoritative headline ("You've used N% of your included total usage"); it
+    becomes one quota dict with ``remainingPercent = 100 - totalPercentUsed`` and
+    a billing-cycle reset, so the existing providers render path surfaces it the
+    same way it does Claude/Codex/Gemini. Fail-silent throughout: a missing
+    token, a rejected cookie, or a malformed payload returns None.
+    """
+
+    name = "cursor"
+    tier = "gray"
+    cred_paths = (
+        "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+    )
+
+    USAGE_URL = "https://cursor.com/api/usage-summary"
+    _UA = "shbr-connector"
+
+    # -- credential ---------------------------------------------------------
+    @staticmethod
+    def _jwt_sub(token: str):
+        """Decode a JWT's ``sub`` claim without any signature check — read-only
+        introspection of a token this machine already holds. Returns None on any
+        malformed segment."""
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+        except (IndexError, ValueError, TypeError):
+            return None
+        sub = claims.get("sub") if isinstance(claims, dict) else None
+        return sub if isinstance(sub, str) and sub else None
+
+    def _token_and_uid(self):
+        """Read ``cursorAuth/accessToken`` from Cursor's SQLite store (read-only)
+        and derive the userId from its JWT ``sub``. Token stays in memory only —
+        never logged or written. Returns ``(token, uid)`` or None."""
+        for p in self.cfg.get("cred_paths") or self.cred_paths:
+            db = os.path.expanduser(p)
+            if not os.path.exists(db):
+                continue
+            try:
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+                try:
+                    row = con.execute(
+                        "SELECT value FROM ItemTable WHERE key=?",
+                        ("cursorAuth/accessToken",),
+                    ).fetchone()
+                finally:
+                    con.close()
+            except sqlite3.Error:
+                continue
+            token = row[0] if row else None
+            if not token or not isinstance(token, str):
+                continue
+            sub = self._jwt_sub(token)
+            if not sub:
+                continue
+            uid = sub.split("|")[-1]
+            if uid:
+                return token, uid
+        return None
+
+    # -- parse --------------------------------------------------------------
+    @staticmethod
+    def _quotas(data: dict) -> list:
+        iu = data.get("individualUsage")
+        plan = iu.get("plan") if isinstance(iu, dict) else None
+        if not isinstance(plan, dict):
+            return []
+        pct = plan.get("totalPercentUsed")
+        if pct is None:
+            return []
+        try:
+            pct = float(pct)
+        except (ValueError, TypeError):
+            return []
+        window = data.get("membershipType") or "plan"
+        return [{
+            "id": "subscription",
+            "window": window,
+            "usedPercent": round(pct, 1),
+            "remainingPercent": round(100 - pct, 1),
+            "resets_at": data.get("billingCycleEnd"),
+            "primary": True,
+        }]
+
+    # -- fetch --------------------------------------------------------------
+    def fetch(self):
+        creds = self._token_and_uid()
+        if not creds:
+            return None
+        token, uid = creds
+        # Cursor authenticates with a session cookie, not a bearer token; the
+        # value is ``<uid>::<token>`` with ``::`` percent-encoded.
+        cookie = "WorkosCursorSessionToken=" + urllib.parse.quote(
+            f"{uid}::{token}", safe="=")
+        headers = {"Cookie": cookie, "Accept": "application/json",
+                   "User-Agent": self._UA}
+        data = self._get_json(self.USAGE_URL, headers=headers)
+        if not isinstance(data, dict):
+            return None
+        quotas = self._quotas(data)
+        if not quotas:
+            return None
+        return {"name": self.name, "status": "live", "tier": self.tier,
+                "quotas": quotas}
+
+
 # Per-provider connectors are registered here as recon confirms an endpoint and
 # credential path for each. Empty until a concrete connector is verified — an
 # unverified provider ships no code rather than a speculative stub.
@@ -746,6 +942,12 @@ CONNECTOR_REGISTRY: dict = {
     "claude": ClaudeConnector,
     "codex": CodexConnector,
     "gemini": GeminiConnector,
+    "antigravity": AntigravityConnector,
+    # Registered under a *distinct* key from the on-by-default ``cursor`` local
+    # composer-session source, so this network connector stays OFF by default
+    # (opt-in via ``[sources.cursor_quota] enabled = true``). Its provider row is
+    # still ``cursor`` (the ``name`` attr), so the quota merges into that row.
+    "cursor_quota": CursorConnector,
 }
 
 

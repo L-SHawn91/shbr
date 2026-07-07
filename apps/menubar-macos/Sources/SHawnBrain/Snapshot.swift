@@ -55,10 +55,25 @@ struct SystemMeter: Decodable {
     var cpu: CPU?
     var memory: Memory?
     var temperatureC: Double?
+    var processes: [Process]?
 
     enum CodingKeys: String, CodingKey {
-        case cpu, memory
+        case cpu, memory, processes
         case temperatureC = "temperature_c"
+    }
+
+    // One running process — metadata only (executable name, never argv).
+    struct Process: Decodable, Identifiable {
+        var pid: Int
+        var name: String
+        var cpuPct: Double?
+        var rss: Double?     // resident memory, bytes
+        var id: Int { pid }
+
+        enum CodingKeys: String, CodingKey {
+            case pid, name, rss
+            case cpuPct = "cpu_pct"
+        }
     }
 
     struct CPU: Decodable {

@@ -14,6 +14,16 @@ final class BrainModel: ObservableObject {
         didSet { restartTimer() }
     }
 
+    // 메뉴바 라벨에 무엇을 보일지. 환경설정에서 토글하면 objectWillChange로 라벨을
+    // 즉시 다시 그린다(refreshSeconds와 같은 @AppStorage+didSet 패턴). 🧠는 항상 표시.
+    @AppStorage("labelShowCpu") var labelShowCpu = true { didSet { objectWillChange.send() } }
+    @AppStorage("labelShowTemp") var labelShowTemp = true { didSet { objectWillChange.send() } }
+    @AppStorage("labelShowMem") var labelShowMem = true { didSet { objectWillChange.send() } }
+    @AppStorage("labelShowAlert") var labelShowAlert = true { didSet { objectWillChange.send() } }
+
+    // 밝은/어두운/시스템 모드. 패널·설정 루트에 preferredColorScheme으로 반영한다.
+    @AppStorage("appearance") var appearance: Appearance = .system { didSet { objectWillChange.send() } }
+
     private var timer: Timer?
     private var inFlight = false
 
@@ -54,10 +64,10 @@ final class BrainModel: ObservableObject {
     var labelText: String {
         guard let g = snapshot?.glance else { return "🧠" }
         var bits: [String] = []
-        if let c = g.cpuPct { bits.append("\(Int(c.rounded()))%") }
-        if let t = g.tempC { bits.append("\(Int(t.rounded()))°") }
-        if let m = g.memPct { bits.append("\(Int(m.rounded()))%") }
-        let marker = g.alert == "crit" ? "🔴 " : (g.alert == "warn" ? "🟡 " : "")
+        if labelShowCpu, let c = g.cpuPct { bits.append("\(Int(c.rounded()))%") }
+        if labelShowTemp, let t = g.tempC { bits.append("\(Int(t.rounded()))°") }
+        if labelShowMem, let m = g.memPct { bits.append("\(Int(m.rounded()))%") }
+        let marker = labelShowAlert ? (g.alert == "crit" ? "🔴 " : (g.alert == "warn" ? "🟡 " : "")) : ""
         return bits.isEmpty ? "🧠" : "🧠 " + marker + bits.joined(separator: " · ")
     }
 

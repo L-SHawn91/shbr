@@ -252,7 +252,7 @@ def menubar_data(meters: list, sessions: list, memory_inv: dict | None = None) -
             "cwd": s.get("cwd"),
             "started_at": s.get("started_at"),
         }
-        for s in sessions[:8]
+        for s in _diverse_sessions(sessions, 12)
     ]
     return {
         "glance": _glance(sysm),
@@ -359,13 +359,45 @@ def render_memory(inv: dict, ops: list) -> list:
 
 
 # --------------------------------------------------------------- sessions
+def _session_recency(s: dict) -> float:
+    """Last-seen timestamp across heterogeneous sources.
+
+    Hermes rows carry only started_at/ended_at; the native claude/cursor readers
+    carry a precise last_at. Ordering by whichever is freshest lets a genuinely
+    active session bubble up regardless of which runtime produced it.
+    """
+    return s.get("last_at") or s.get("ended_at") or s.get("started_at") or 0
+
+
 def build_sessions(sources, hours: float) -> dict:
     out = []
     for s in sources:
         for sess in s.sessions(hours):
             out.append({**sess, "source": sess.get("source", s.name)})
-    out.sort(key=lambda x: x.get("started_at") or 0, reverse=True)
+    out.sort(key=_session_recency, reverse=True)
     return {"hours": hours, "sessions": out[:50]}
+
+
+def _diverse_sessions(sessions: list, limit: int) -> list:
+    """Round-robin across sources so no single runtime crowds out the rest.
+
+    HermesSource can return dozens of open sessions; a plain head-slice would
+    bury the (fewer) claude/cursor rows entirely — the "왜 죄다 헤르메스" bug.
+    Within each source the input order (recency-sorted) is preserved, so each
+    round still surfaces that source's freshest session first.
+    """
+    groups: dict = {}
+    for s in sessions:
+        groups.setdefault(s.get("source"), []).append(s)
+    order = sorted(groups, key=lambda k: _session_recency(groups[k][0]), reverse=True)
+    out: list = []
+    while len(out) < limit and any(groups[k] for k in order):
+        for k in order:
+            if groups[k]:
+                out.append(groups[k].pop(0))
+                if len(out) >= limit:
+                    break
+    return out
 
 
 def render_sessions(data: dict) -> list:

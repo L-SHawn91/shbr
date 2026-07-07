@@ -25,6 +25,8 @@ DEFAULTS = {
     "sources": {
         "usage": {"enabled": True},  # native local token reader (codex/claude on-disk state)
         "claude_memory": {"enabled": True, "glob": CLAUDE_MEMORY_GLOB},
+        "claude_sessions": {"enabled": True},  # Claude Code transcripts → per-session rows (available() gates)
+        "cursor": {"enabled": True},  # Cursor IDE composer sessions (available() gates when not installed)
         "system": {"enabled": True},  # host CPU / memory / temperature observer
     },
 }

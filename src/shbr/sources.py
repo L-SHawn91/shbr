@@ -388,6 +388,353 @@ class HermesSource(Source):
         return {"hermes": self.memory_glob}
 
 
+# ----------------------------------------------------------- Antigravity
+class AntigravitySource(Source):
+    """Local session/activity reader for Antigravity IDE (Google's agentic
+    IDE on Gemini). Antigravity keeps its own conversation store, separate
+    from the plain Gemini CLI, so shbr's usage sources never see its activity.
+
+    Metadata only: session count, recency, workspace, title / step-count —
+    never token totals or message content (those live in opaque per-conversation
+    blobs; remaining quota comes from the antigravity *connector*, not here).
+    Opt-in and absent from the default config; SQLite is opened read-only.
+    """
+
+    name = "antigravity"
+
+    DEF_HISTORY = "~/.gemini/antigravity-cli/history.jsonl"
+    DEF_SUMMARIES = "~/.gemini/antigravity-cli/conversation_summaries.db"
+
+    def __init__(self, cfg: dict):
+        self.history = os.path.expanduser(cfg.get("history", self.DEF_HISTORY))
+        self.summaries = os.path.expanduser(cfg.get("summaries", self.DEF_SUMMARIES))
+        # a conversation whose last activity is within this window reads "active"
+        self.active_window = float(cfg.get("active_window_s", 900))
+
+    @classmethod
+    def available(cls, cfg: dict) -> bool:
+        paths = (cfg.get("history", cls.DEF_HISTORY),
+                 cfg.get("summaries", cls.DEF_SUMMARIES))
+        return any(os.path.exists(os.path.expanduser(p)) for p in paths)
+
+    @staticmethod
+    def _ts(value):
+        """Antigravity stamps are ms-epoch ints (history.jsonl) or datetime
+        strings (summaries db). Normalize both to unix seconds; None on junk."""
+        if isinstance(value, (int, float)):
+            # history.jsonl records milliseconds since epoch
+            return value / 1000.0 if value > 1e12 else float(value)
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            e = _epoch(s)
+            if e is not None:
+                return e
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    return time.mktime(time.strptime(s, fmt))
+                except (ValueError, OverflowError):
+                    continue
+        return None
+
+    def _from_history(self) -> dict:
+        """conversation_id -> {first, last, workspace, messages} from the
+        activity log. Fail-silent on any read / parse error."""
+        out = {}
+        try:
+            with open(self.history, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return out
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            cid = obj.get("conversationId")
+            if not cid:
+                continue
+            ts = self._ts(obj.get("timestamp"))
+            rec = out.setdefault(
+                cid, {"first": ts, "last": ts,
+                      "workspace": obj.get("workspace"), "messages": 0})
+            rec["messages"] += 1
+            if ts is not None:
+                rec["first"] = ts if rec["first"] is None else min(rec["first"], ts)
+                rec["last"] = ts if rec["last"] is None else max(rec["last"], ts)
+            if obj.get("workspace"):
+                rec["workspace"] = obj["workspace"]
+        return out
+
+    def _from_summaries(self) -> dict:
+        """conversation_id -> {title, steps, workspace, status, last} from the
+        SQLite summary registry (read-only). Empty on any error."""
+        out = {}
+        if not os.path.exists(self.summaries):
+            return out
+        try:
+            con = sqlite3.connect(f"file:{self.summaries}?mode=ro",
+                                  uri=True, timeout=5)
+        except sqlite3.Error:
+            return out
+        try:
+            rows = con.execute(
+                "SELECT conversation_id, title, step_count, workspace_uris, "
+                "status, last_user_input_time, last_modified_time "
+                "FROM conversation_summaries"
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            con.close()
+        for cid, title, steps, ws, status, last_in, last_mod in rows:
+            if not cid:
+                continue
+            out[cid] = {"title": title, "steps": steps, "workspace": ws,
+                        "status": status,
+                        "last": self._ts(last_in) or self._ts(last_mod)}
+        return out
+
+    def sessions(self, hours: float):
+        hist = self._from_history()
+        summ = self._from_summaries()
+        ids = set(hist) | set(summ)
+        if not ids:
+            return []
+        t = now()
+        since = t - hours * 3600
+        out = []
+        for cid in ids:
+            h = hist.get(cid, {})
+            s = summ.get(cid, {})
+            last = s.get("last") or h.get("last")
+            started = h.get("first") or last
+            if last is not None and last < since:
+                continue
+            out.append({
+                "id": cid,
+                "source": self.name,
+                "runtime": self.name,
+                "model": None,
+                "started_at": started,
+                "last_at": last,
+                "ended_at": None,
+                "messages": h.get("messages"),
+                "steps": s.get("steps"),
+                "tokens": None,  # metadata only — no token totals here
+                "cwd": s.get("workspace") or h.get("workspace"),
+                "title": s.get("title"),
+                "status": s.get("status"),
+                "active": last is not None and last > t - self.active_window,
+            })
+        out.sort(key=lambda r: (r.get("last_at") or 0), reverse=True)
+        return out[:50]
+
+
+# ------------------------------------------------------ Claude Code sessions
+class ClaudeSessionSource(Source):
+    """Session reader for Claude Code's own transcripts.
+
+    Claude Code writes one JSONL transcript per session under
+    ``~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl``. The plain
+    ``usage`` source only reads Claude's aggregate token *ledger*; nothing else
+    surfaces these as individual sessions — so real Claude Code work never
+    appeared in the sessions list (only Hermes-orchestrated runs did).
+
+    Metadata only: session id, model, workspace, first/last activity, message
+    count, and summed input+output tokens computed locally from the transcript.
+    Message *content* is never read into the payload. Files are only read, never
+    written; stale transcripts (older than the window by mtime) are skipped so a
+    refresh only touches recently-active sessions.
+    """
+
+    name = "claude_sessions"
+    DEF_GLOB = "~/.claude/projects/*/*.jsonl"
+
+    def __init__(self, cfg: dict):
+        self.glob = os.path.expanduser(cfg.get("glob", self.DEF_GLOB))
+        self.active_window = float(cfg.get("active_window_s", 900))
+
+    @classmethod
+    def available(cls, cfg: dict) -> bool:
+        return bool(glob.glob(os.path.expanduser(cfg.get("glob", cls.DEF_GLOB))))
+
+    def _parse(self, path: str) -> dict | None:
+        """Fold one transcript into a metadata record. None on unreadable."""
+        first = last = None
+        model = None
+        messages = 0
+        tokens = 0
+        cwd = None
+        sid = None
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+                    sid = obj.get("sessionId") or sid
+                    if obj.get("cwd"):
+                        cwd = obj["cwd"]
+                    ts = _epoch(obj.get("timestamp"))
+                    if ts is not None:
+                        first = ts if first is None else min(first, ts)
+                        last = ts if last is None else max(last, ts)
+                    if obj.get("type") in ("user", "assistant"):
+                        messages += 1
+                    msg = obj.get("message")
+                    if isinstance(msg, dict):
+                        if msg.get("model"):
+                            model = msg["model"]
+                        usage = msg.get("usage")
+                        if isinstance(usage, dict):
+                            tokens += (usage.get("input_tokens") or 0) + (
+                                usage.get("output_tokens") or 0)
+        except OSError:
+            return None
+        if sid is None:
+            sid = os.path.splitext(os.path.basename(path))[0]
+        return {"id": sid, "model": model, "cwd": cwd, "first": first,
+                "last": last, "messages": messages, "tokens": tokens or None}
+
+    def sessions(self, hours: float):
+        t = now()
+        since = t - hours * 3600
+        out = []
+        for path in glob.glob(self.glob):
+            try:
+                if os.path.getmtime(path) < since:
+                    continue
+            except OSError:
+                continue
+            rec = self._parse(path)
+            if rec is None:
+                continue
+            last = rec["last"]
+            if last is not None and last < since:
+                continue
+            out.append({
+                "id": rec["id"],
+                "source": "claude",   # display label — the runtime, not the config key
+                "runtime": "claude",
+                "model": rec["model"],
+                "started_at": rec["first"] or last,
+                "last_at": last,
+                "ended_at": None,
+                "messages": rec["messages"],
+                "tokens": rec["tokens"],
+                "cwd": rec["cwd"],
+                "active": last is not None and last > t - self.active_window,
+            })
+        out.sort(key=lambda r: (r.get("last_at") or 0), reverse=True)
+        return out[:50]
+
+
+# ---------------------------------------------------------------- Cursor
+class CursorSource(Source):
+    """Session reader for the Cursor IDE agent.
+
+    Cursor keeps its composer (chat/agent) sessions in a SQLite key-value store
+    at ``~/Library/Application Support/Cursor/User/globalStorage/state.vscdb``:
+    one ``composerData:<uuid>`` row per session. shbr's usage/token sources
+    never see Cursor activity, so it goes here.
+
+    Metadata only: composer id, mode/model, title, created/updated time, and
+    message count (from the conversation header list). Message *content* lives in
+    separate ``bubbleId:*`` rows and is never read. SQLite is opened read-only.
+    Opt-in via ``available()`` — silently absent when Cursor isn't installed.
+    """
+
+    name = "cursor"
+    DEF_DB = ("~/Library/Application Support/Cursor/User/"
+              "globalStorage/state.vscdb")
+
+    def __init__(self, cfg: dict):
+        self.db = os.path.expanduser(cfg.get("db", self.DEF_DB))
+        self.active_window = float(cfg.get("active_window_s", 900))
+
+    @classmethod
+    def available(cls, cfg: dict) -> bool:
+        return os.path.exists(os.path.expanduser(cfg.get("db", cls.DEF_DB)))
+
+    @staticmethod
+    def _ms(v):
+        """Cursor stamps are ms-epoch ints. Normalize to unix seconds."""
+        if isinstance(v, (int, float)) and v > 0:
+            return v / 1000.0 if v > 1e12 else float(v)
+        return None
+
+    @staticmethod
+    def _cwd(d: dict):
+        for r in (d.get("trackedGitRepos") or []):
+            if isinstance(r, dict):
+                u = r.get("rootUri") or r.get("repoRoot")
+                if u:
+                    return u
+        return None
+
+    def sessions(self, hours: float):
+        if not os.path.exists(self.db):
+            return []
+        try:
+            con = sqlite3.connect(f"file:{self.db}?mode=ro", uri=True, timeout=5)
+        except sqlite3.Error:
+            return []
+        try:
+            rows = con.execute(
+                "SELECT value FROM cursorDiskKV WHERE key LIKE 'composerData:%'"
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            con.close()
+        t = now()
+        since = t - hours * 3600
+        out = []
+        for (val,) in rows:
+            try:
+                d = json.loads(val)
+            except (ValueError, TypeError):
+                continue
+            created = self._ms(d.get("createdAt"))
+            last = self._ms(d.get("lastUpdatedAt")) or created
+            if last is not None and last < since:
+                continue
+            mc = d.get("modelConfig") or {}
+            model = mc.get("modelName")
+            if model in (None, "", "default"):
+                model = d.get("unifiedMode") or "default"
+            headers = d.get("fullConversationHeadersOnly")
+            messages = len(headers) if isinstance(headers, list) else None
+            status = d.get("status")
+            out.append({
+                "id": d.get("composerId"),
+                "source": self.name,
+                "runtime": self.name,
+                "model": model,
+                "started_at": created,
+                "last_at": last,
+                "ended_at": None,
+                "messages": messages,
+                "tokens": None,  # usage blobs are empty — metadata only
+                "cwd": self._cwd(d),
+                "title": d.get("name"),
+                "status": status,
+                "active": status not in ("completed", "aborted")
+                and last is not None and last > t - self.active_window,
+            })
+        out.sort(key=lambda r: (r.get("last_at") or 0), reverse=True)
+        return out[:50]
+
+
 # ---------------------------------------------------------------- System
 class SystemSource(Source):
     """Host resource observer — CPU, memory, temperature.
@@ -539,6 +886,51 @@ class SystemSource(Source):
                 return round(v, 1)
         return None
 
+    # -- processes ----------------------------------------------------
+    def _processes(self, limit=10):
+        """Top CPU/memory consumers — metadata only, no command arguments.
+
+        Uses ``comm`` (executable name only), never the full argv, so process
+        secrets in command-line flags never enter the payload. Returns the
+        union of the top-``limit`` by CPU and the top-``limit`` by resident
+        memory, so both the CPU tile and the Memory tile have something to show.
+        """
+        fmt = "pid=,pcpu=,rss=,comm="
+        if sys.platform == "darwin":
+            raw = self._run(["ps", "-Aco", fmt])  # -c → executable name, no args
+        elif sys.platform.startswith("linux"):
+            raw = self._run(["ps", "-eo", fmt])   # comm is already args-free
+        else:
+            return None
+        if not raw:
+            return None
+        procs = []
+        for line in raw.splitlines():
+            parts = line.split(None, 3)  # keep names with spaces intact
+            if len(parts) < 4:
+                continue
+            pid_s, cpu_s, rss_s, name = parts
+            try:
+                pid = int(pid_s)
+                cpu = float(cpu_s)
+                rss = int(rss_s) * 1024  # ps reports RSS in KiB
+            except ValueError:
+                continue
+            if pid == 0:
+                continue
+            procs.append({"pid": pid, "name": name.strip(),
+                          "cpu_pct": round(cpu, 1), "rss": rss})
+        if not procs:
+            return None
+        top_cpu = sorted(procs, key=lambda p: p["cpu_pct"], reverse=True)[:limit]
+        top_mem = sorted(procs, key=lambda p: p["rss"], reverse=True)[:limit]
+        seen, union = set(), []
+        for p in top_cpu + top_mem:
+            if p["pid"] not in seen:
+                seen.add(p["pid"])
+                union.append(p)
+        return union
+
     def meter(self):
         return {
             "kind": "system",
@@ -546,14 +938,18 @@ class SystemSource(Source):
             "cpu": self._cpu(),
             "memory": self._memory(),
             "temperature_c": self._temperature(),
+            "processes": self._processes(),
         }
 
 
 REGISTRY = {
     "usage": UsageSource,
     "claude_memory": ClaudeMemorySource,
+    "claude_sessions": ClaudeSessionSource,
+    "cursor": CursorSource,
     "system": SystemSource,
     "hermes": HermesSource,
+    "antigravity": AntigravitySource,
 }
 
 

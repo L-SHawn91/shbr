@@ -483,6 +483,19 @@ class GeminiConnector(Connector):
     _CID_RE = re.compile(r"""OAUTH_CLIENT_ID\s*[:=]\s*["']([^"']+)["']""")
     _SECRET_RE = re.compile(r"""OAUTH_CLIENT_SECRET\s*[:=]\s*["']([^"']+)["']""")
 
+    # The quota API enumerates one bucket per model — currently 8, most of them
+    # preview/opt-in. "Primary" = the models the Gemini CLI actually routes to by
+    # default, i.e. its DEFAULT_GEMINI_MODEL / _FLASH_MODEL / _FLASH_LITE_MODEL
+    # constants (not _MODEL_AUTO / _EMBEDDING_MODEL). We scan the installed CLI
+    # bundle for those literals so the primary set tracks the CLI's own defaults
+    # across model generations; the tuple below is the fallback when the scan
+    # finds nothing. Each quota is tagged ``primary`` so the frontend can show
+    # these expanded and collapse the rest.
+    _MODEL_RE = re.compile(
+        r"""DEFAULT_GEMINI(?:_FLASH(?:_LITE)?)?_MODEL\s*[:=]\s*["']([^"']+)["']""")
+    _PRIMARY_FALLBACK = ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-flash-lite")
+    _primary_cache = None  # per-process memo; the installed bundle can't change mid-run
+
     # -- credential ---------------------------------------------------------
     def _creds(self) -> dict:
         for p in self.cfg.get("cred_paths") or self.cred_paths:
@@ -551,6 +564,49 @@ class GeminiConnector(Connector):
                     if cid and secret:
                         return cid, secret
         return cid, secret
+
+    @classmethod
+    def _scan_default_models(cls) -> set:
+        """Bounded scan of the CLI bundle for its DEFAULT_*_MODEL literals.
+
+        These are the models the Gemini CLI routes to by default (pro / flash /
+        flash-lite) — the "primary" set. Memoised per process; returns an empty
+        set when nothing is found so the caller can fall back to the allowlist.
+        """
+        if cls._primary_cache is not None:
+            return cls._primary_cache
+        found: set = set()
+        for root in cls._scan_roots():
+            for pat in (
+                os.path.join(root, "@google/gemini-cli/bundle/*.js"),
+                os.path.join(root, "**/@google/gemini-cli/bundle/*.js"),
+                os.path.join(
+                    root, "**/@google/gemini-cli-core/dist/src/config/models.js"),
+            ):
+                try:
+                    files = sorted(glob.glob(pat, recursive="**" in pat))
+                except (OSError, ValueError):
+                    continue
+                for fp in files[:120]:
+                    try:
+                        with open(fp, encoding="utf-8", errors="ignore") as f:
+                            text = f.read()
+                    except OSError:
+                        continue
+                    for m in cls._MODEL_RE.finditer(text):
+                        found.add(m.group(1))
+                if found:
+                    cls._primary_cache = found
+                    return found
+        cls._primary_cache = found
+        return found
+
+    def _primary_models(self) -> set:
+        """The models to show expanded: config override → bundle scan → fallback."""
+        cfg_models = self.cfg.get("primary_models")
+        if isinstance(cfg_models, (list, tuple)) and cfg_models:
+            return {str(m) for m in cfg_models}
+        return self._scan_default_models() or set(self._PRIMARY_FALLBACK)
 
     def _client_creds(self, creds: dict):
         cid = os.environ.get("GEMINI_OAUTH_CLIENT_ID") or creds.get("client_id")
@@ -626,7 +682,7 @@ class GeminiConnector(Connector):
 
     # -- parse --------------------------------------------------------------
     @staticmethod
-    def _quotas(data: dict) -> list:
+    def _quotas(data: dict, primary: set) -> list:
         buckets = data.get("buckets")
         if not isinstance(buckets, list):
             return []
@@ -647,6 +703,9 @@ class GeminiConnector(Connector):
                 "remainingPercent": rp,
                 "resets_at": b.get("resetTime"),
                 "tokenType": b.get("tokenType"),
+                # Default-routed models are shown expanded; the rest (preview /
+                # opt-in) are tagged secondary so the frontend can collapse them.
+                "primary": model in primary,
             }
             amt = b.get("remainingAmount")
             if amt is not None and frac > 0:
@@ -673,7 +732,7 @@ class GeminiConnector(Connector):
             data = self._run(access, project)
         if not isinstance(data, dict):
             return None
-        quotas = self._quotas(data)
+        quotas = self._quotas(data, self._primary_models())
         if not quotas:
             return None
         return {"name": self.name, "status": "live", "tier": self.tier,

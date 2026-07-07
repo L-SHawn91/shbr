@@ -119,6 +119,10 @@ struct AgentMeter: Decodable {
         var window: String?
         var remainingPercent: Double?
         var usedPercent: Double?
+        // Default-routed model → shown expanded. Preview/opt-in models arrive
+        // false and are collapsed behind a disclosure. Absent (claude/codex) is
+        // treated as primary so those providers show every quota as before.
+        var primary: Bool?
     }
 }
 

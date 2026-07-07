@@ -16,6 +16,15 @@ struct ContentView: View {
         case file(String, String)   // path, display name
     }
     @State private var route: [Route] = []
+    // Detail-view disclosure: preview/opt-in quotas stay collapsed until tapped.
+    @State private var showAllQuotas = false
+
+    // Default-routed models (primary != false) show; the rest collapse. Providers
+    // that don't tag primary (claude/codex) leave it nil → everything is primary.
+    private func splitQuotas(_ quotas: [AgentMeter.Quota])
+        -> (primary: [AgentMeter.Quota], secondary: [AgentMeter.Quota]) {
+        (quotas.filter { $0.primary != false }, quotas.filter { $0.primary == false })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -219,8 +228,13 @@ struct ContentView: View {
                         .font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary)
                 }
                 if let quotas = (p.quotas?.filter { $0.remainingPercent != nil }), !quotas.isEmpty {
-                    ForEach(Array(quotas.enumerated()), id: \.offset) { _, q in
+                    let split = splitQuotas(quotas)
+                    ForEach(Array(split.primary.enumerated()), id: \.offset) { _, q in
                         quotaRow(q)
+                    }
+                    if !split.secondary.isEmpty {
+                        Text("＋ \(split.secondary.count)개 모델 더")
+                            .font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -373,15 +387,45 @@ struct ContentView: View {
                             tokenRow("All time", p.all)
                         }
                     }
-                    // quotas
+                    // quotas — primary (default-routed) always shown; preview /
+                    // opt-in models collapse behind a tappable disclosure.
                     let quotas = p.quotas ?? []
                     if !quotas.isEmpty {
+                        let split = splitQuotas(quotas)
                         sectionTitle("QUOTAS")
                         card(padding: 11) {
                             VStack(spacing: 10) {
-                                ForEach(Array(quotas.enumerated()), id: \.offset) { i, q in
+                                ForEach(Array(split.primary.enumerated()), id: \.offset) { i, q in
                                     if i > 0 { Divider().opacity(0.4) }
                                     quotaDetailRow(q)
+                                }
+                                if !split.secondary.isEmpty {
+                                    Divider().opacity(0.4)
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            showAllQuotas.toggle()
+                                        }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: showAllQuotas
+                                                ? "chevron.down" : "chevron.right")
+                                                .font(.system(size: 9, weight: .semibold))
+                                            Text(showAllQuotas
+                                                ? "미리보기 모델 접기"
+                                                : "미리보기 모델 \(split.secondary.count)개 더 보기")
+                                                .font(.caption)
+                                            Spacer()
+                                        }
+                                        .foregroundStyle(.secondary)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    if showAllQuotas {
+                                        ForEach(Array(split.secondary.enumerated()), id: \.offset) { _, q in
+                                            Divider().opacity(0.4)
+                                            quotaDetailRow(q)
+                                        }
+                                    }
                                 }
                             }
                         }

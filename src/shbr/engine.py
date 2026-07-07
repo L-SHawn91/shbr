@@ -83,11 +83,19 @@ def _render_providers(m: list, lines: list) -> None:
     if not provs:
         lines.append("  (no providers reported)")
     for name, p in provs.items():
-        quota_bits = []
-        for q in p.get("quotas") or []:
-            rp = q.get("remainingPercent")
-            if rp is not None:
-                quota_bits.append(f"{q.get('window') or q.get('id')}:{rp:.0f}%left")
+        # Lowest-remaining first — that's the actionable end (nearest a limit).
+        # Some providers (gemini) enumerate a bucket per model; cap the text
+        # render so the line stays glanceable. --json keeps every quota.
+        ranked = sorted(
+            ((q.get("remainingPercent"), q.get("window") or q.get("id"))
+             for q in p.get("quotas") or []
+             if q.get("remainingPercent") is not None),
+            key=lambda t: t[0],
+        )
+        cap = 4
+        quota_bits = [f"{w}:{rp:.0f}%left" for rp, w in ranked[:cap]]
+        if len(ranked) > cap:
+            quota_bits.append(f"+{len(ranked) - cap} more")
         quota = "  quota[" + ", ".join(quota_bits) + "]" if quota_bits else ""
         lines.append(
             f"  {name:10s} today {fmt_tok(p.get('today')):>7} / "

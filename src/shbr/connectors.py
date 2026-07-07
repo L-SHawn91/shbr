@@ -935,6 +935,149 @@ class CursorConnector(Connector):
                 "quotas": quotas}
 
 
+class CopilotConnector(Connector):
+    """GitHub Copilot premium-request quota reader — the "구독 소모량" for the
+    monthly premium-interaction allowance no local file records.
+
+    GRAY tier: the endpoint (``copilot_internal/user``) is undocumented and was
+    confirmed by recon, not published by GitHub. It reuses the GitHub credential
+    the ``gh`` CLI already stored on this machine — the SAME login the user set up
+    for GitHub — by shelling out to ``gh api`` (a read GET). Going through ``gh``
+    means the token stays inside ``gh``'s own keyring: this connector never reads,
+    logs, writes, or transmits it. There is no Copilot-editor dotfile on this
+    machine (``~/.config/github-copilot/`` is absent), so the gh login is the only
+    credential and the natural double-gate.
+
+    The response carries a ``quota_snapshots`` map (``chat`` / ``completions`` /
+    ``premium_interactions``); each snapshot has ``percent_remaining`` (0–100),
+    ``unlimited``, ``has_quota`` and an ``entitlement``. The unlimited pools always
+    read 100% and are skipped — the metered ``premium_interactions`` allowance is
+    the meaningful meter and becomes the primary quota, with
+    ``remainingPercent = percent_remaining`` and the plan-wide ``quota_reset_date``
+    as its reset. Fail-silent throughout: no gh, an unauthenticated gh, a non-zero
+    exit, or a malformed payload returns None.
+    """
+
+    name = "copilot"
+    tier = "gray"
+    # gh keeps its token in the OS keyring, not this file; presence still signals
+    # a configured gh, and ``available`` also accepts an authenticated gh / env
+    # token, mirroring ClaudeConnector's Keychain override.
+    cred_paths = ("~/.config/gh/hosts.yml",)
+
+    _API_PATH = "copilot_internal/user"
+    # premium_interactions is the only genuinely metered pool; chat/completions
+    # come back unlimited on these plans and are dropped rather than shown as a
+    # permanent 100%.
+    _PRIMARY = "premium_interactions"
+
+    @staticmethod
+    def _gh_bin():
+        """Locate the ``gh`` binary via PATH, then common Homebrew locations —
+        the app may run shbr with a trimmed PATH that omits /opt/homebrew/bin."""
+        found = shutil.which("gh")
+        if found:
+            return found
+        for p in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh"):
+            if os.path.exists(p):
+                return p
+        return None
+
+    @classmethod
+    def _gh_ready(cls) -> bool:
+        """True if gh is installed AND authenticated (keyring or GITHUB_TOKEN).
+        ``gh auth status`` returns 0 in either case — one check covers both."""
+        gh = cls._gh_bin()
+        if not gh:
+            return False
+        try:
+            return subprocess.run(
+                [gh, "auth", "status"],
+                capture_output=True, text=True, timeout=5,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    @classmethod
+    def available(cls, cfg: dict) -> bool:
+        """Enabled AND an authenticated gh exists.
+
+        The base gate only checks ``cred_paths`` on disk, but gh stores its token
+        in the OS keyring, so the dotfile alone is not enough — verify gh is
+        actually logged in (which also covers a ``GITHUB_TOKEN`` env login)."""
+        if not cfg.get("enabled"):
+            return False
+        return cls._gh_ready()
+
+    # -- fetch --------------------------------------------------------------
+    def _api_json(self):
+        """``gh api copilot_internal/user`` → parsed dict, or None. gh owns the
+        token; we only ever see the JSON body it returns."""
+        gh = self._gh_bin()
+        if not gh:
+            return None
+        try:
+            proc = subprocess.run(
+                [gh, "api", self._API_PATH],
+                capture_output=True, text=True, timeout=HTTP_TIMEOUT + 4,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        try:
+            data = json.loads(proc.stdout)
+        except (ValueError, TypeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    # -- parse --------------------------------------------------------------
+    @classmethod
+    def _quotas(cls, data: dict) -> list:
+        snaps = data.get("quota_snapshots")
+        if not isinstance(snaps, dict):
+            return []
+        resets = data.get("quota_reset_date") or data.get("quota_reset_date_utc")
+        out = []
+        for key, snap in snaps.items():
+            if not isinstance(snap, dict):
+                continue
+            # Skip pools with no meter or an unlimited allowance — they always
+            # read 100% and carry no usable "구독 소모량".
+            if snap.get("unlimited") or not snap.get("has_quota"):
+                continue
+            pct = snap.get("percent_remaining")
+            if pct is None:
+                continue
+            try:
+                pct = float(pct)
+            except (ValueError, TypeError):
+                continue
+            qid = snap.get("quota_id") or key
+            out.append({
+                "id": qid,
+                "window": "premium" if key == cls._PRIMARY else key,
+                "usedPercent": round(100 - pct, 1),
+                "remainingPercent": round(pct, 1),
+                "resets_at": resets,
+                "primary": key == cls._PRIMARY,
+            })
+        # Guarantee a primary if premium_interactions was absent but others exist.
+        if out and not any(q["primary"] for q in out):
+            out[0]["primary"] = True
+        return out
+
+    def fetch(self):
+        data = self._api_json()
+        if not isinstance(data, dict):
+            return None
+        quotas = self._quotas(data)
+        if not quotas:
+            return None
+        return {"name": self.name, "status": "live", "tier": self.tier,
+                "quotas": quotas}
+
+
 # Per-provider connectors are registered here as recon confirms an endpoint and
 # credential path for each. Empty until a concrete connector is verified — an
 # unverified provider ships no code rather than a speculative stub.
@@ -943,6 +1086,10 @@ CONNECTOR_REGISTRY: dict = {
     "codex": CodexConnector,
     "gemini": GeminiConnector,
     "antigravity": AntigravityConnector,
+    # OFF by default (absent from DEFAULTS.sources); opt-in via
+    # ``[sources.copilot] enabled = true``. Credential is the existing ``gh`` CLI
+    # login — no Copilot-editor dotfile exists on this machine.
+    "copilot": CopilotConnector,
     # Registered under a *distinct* key from the on-by-default ``cursor`` local
     # composer-session source, so this network connector stays OFF by default
     # (opt-in via ``[sources.cursor_quota] enabled = true``). Its provider row is

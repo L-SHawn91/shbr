@@ -75,6 +75,8 @@ class UsageSource(Source):
             cfg.get("claude_stats", "~/.claude/stats-cache.json"))
         self.gemini_dir = os.path.expanduser(
             cfg.get("gemini_dir", "~/.gemini"))
+        self.opencode_db = os.path.expanduser(
+            cfg.get("opencode_db", "~/.local/share/opencode/opencode.db"))
 
     def _readers(self):
         """(provider_name, reader) for every known agent, screened each run."""
@@ -82,6 +84,7 @@ class UsageSource(Source):
             ("codex", self._codex),
             ("claude", self._claude),
             ("gemini", self._gemini),
+            ("opencode", self._opencode),
         )
 
     @classmethod
@@ -92,6 +95,7 @@ class UsageSource(Source):
             cfg.get("codex_db", "~/.codex/state_5.sqlite"),
             cfg.get("claude_stats", "~/.claude/stats-cache.json"),
             cfg.get("gemini_dir", "~/.gemini"),
+            cfg.get("opencode_db", "~/.local/share/opencode/opencode.db"),
         )
         return any(os.path.exists(os.path.expanduser(p)) for p in paths)
 
@@ -208,6 +212,47 @@ class UsageSource(Source):
         if not seen:
             return None
         return self._totals(b["all"], b["today"], b["week"], b["month"])
+
+    # -- opencode: sum per-message token counts by last-activity window -
+    def _opencode(self):
+        # opencode (local AI coding agent) stores each turn in a SQLite ledger;
+        # assistant messages stamp usage as JSON $.tokens.total with the row's
+        # time_created in epoch *milliseconds*. Read metadata only (role/tokens/
+        # timestamp) — the secret-bearing account/credential tables are never
+        # touched. Opened strictly read-only.
+        if not os.path.exists(self.opencode_db):
+            return None
+        try:
+            con = sqlite3.connect(f"file:{self.opencode_db}?mode=ro",
+                                  uri=True, timeout=5)
+        except sqlite3.Error:
+            return None
+        try:
+            t_ms = now() * 1000
+            row = con.execute(
+                """
+                SELECT
+                  COALESCE(SUM(CAST(json_extract(data,'$.tokens.total') AS INTEGER)), 0),
+                  COALESCE(SUM(CASE WHEN time_created > ?
+                    THEN CAST(json_extract(data,'$.tokens.total') AS INTEGER) END), 0),
+                  COALESCE(SUM(CASE WHEN time_created > ?
+                    THEN CAST(json_extract(data,'$.tokens.total') AS INTEGER) END), 0),
+                  COALESCE(SUM(CASE WHEN time_created > ?
+                    THEN CAST(json_extract(data,'$.tokens.total') AS INTEGER) END), 0)
+                FROM message
+                WHERE json_extract(data,'$.role') = 'assistant'
+                  AND json_extract(data,'$.tokens.total') IS NOT NULL
+                """,
+                (t_ms - 86400_000, t_ms - 7 * 86400_000, t_ms - 30 * 86400_000),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            con.close()
+        if not row:
+            return None
+        all_, today, week, month = row
+        return self._totals(all_, today, week, month)
 
     def meter(self):
         providers = {}

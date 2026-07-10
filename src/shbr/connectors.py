@@ -54,7 +54,11 @@ import urllib.request
 
 
 # Network calls are bounded hard: a connector must never make the menu bar hang.
-HTTP_TIMEOUT = 4.0
+# 2s caps a hung provider's drag on the panel-open poll (which is otherwise
+# build_meter-bound at ~1.6s); a slow/timed-out fetch falls back to the 300s
+# cache (see _fetch_connector_results phase 3), so this trades a stale row on a
+# slow network for a bounded wall — not a blank row.
+HTTP_TIMEOUT = 2.0
 
 
 class Connector:
@@ -529,6 +533,36 @@ class GeminiConnector(Connector):
         ]
         return roots
 
+    # The bundle scan is the connector's single biggest cost: the recursive
+    # ``**/`` fallbacks walk node_modules / nvm trees (~230k dirs, ~2.5s) on
+    # every poll. But the file that holds the literals almost never moves, so we
+    # remember its *path* (not the secret — that stays in the bundle) and read
+    # just that file next time. A stale path (CLI reinstalled/moved) simply
+    # fails the fast read and falls back to a full scan that re-remembers.
+    _SCAN_STATE = os.path.expanduser("~/.local/state/shbr/gemini-scan.json")
+
+    @classmethod
+    def _scan_state(cls) -> dict:
+        try:
+            with open(cls._SCAN_STATE, encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    @classmethod
+    def _remember_scan(cls, key: str, path: str) -> None:
+        d = cls._scan_state()
+        if d.get(key) == path:
+            return
+        d[key] = path
+        try:
+            os.makedirs(os.path.dirname(cls._SCAN_STATE), exist_ok=True)
+            with open(cls._SCAN_STATE, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+        except OSError:
+            pass
+
     @classmethod
     def _scan_bundle(cls):
         """Best-effort, bounded scan for the compiled client id / secret.
@@ -538,6 +572,31 @@ class GeminiConnector(Connector):
         a handful of files and stops as soon as both literals are found.
         """
         cid = secret = None
+
+        def _read(fp, cid, secret):
+            try:
+                with open(fp, encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except OSError:
+                return cid, secret
+            if not cid:
+                m = cls._CID_RE.search(text)
+                if m:
+                    cid = m.group(1)
+            if not secret:
+                m = cls._SECRET_RE.search(text)
+                if m:
+                    secret = m.group(1)
+            return cid, secret
+
+        # Fast path: the file that yielded the literals last time rarely moves.
+        cached = cls._scan_state().get("bundle_file")
+        if cached and os.path.exists(cached):
+            cid, secret = _read(cached, cid, secret)
+            if cid and secret:
+                return cid, secret
+
+        # Slow path: full (recursive) glob; remember the winning file.
         for root in cls._scan_roots():
             for pat in (
                 os.path.join(root, "@google/gemini-cli/bundle/*.js"),
@@ -550,20 +609,9 @@ class GeminiConnector(Connector):
                 except (OSError, ValueError):
                     continue
                 for fp in files[:120]:
-                    try:
-                        with open(fp, encoding="utf-8", errors="ignore") as f:
-                            text = f.read()
-                    except OSError:
-                        continue
-                    if not cid:
-                        m = cls._CID_RE.search(text)
-                        if m:
-                            cid = m.group(1)
-                    if not secret:
-                        m = cls._SECRET_RE.search(text)
-                        if m:
-                            secret = m.group(1)
+                    cid, secret = _read(fp, cid, secret)
                     if cid and secret:
+                        cls._remember_scan("bundle_file", fp)
                         return cid, secret
         return cid, secret
 
@@ -577,6 +625,24 @@ class GeminiConnector(Connector):
         """
         if cls._primary_cache is not None:
             return cls._primary_cache
+
+        def _read(fp):
+            try:
+                with open(fp, encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except OSError:
+                return set()
+            return {m.group(1) for m in cls._MODEL_RE.finditer(text)}
+
+        # Fast path: the previously-winning file, if it still exists.
+        cached = cls._scan_state().get("models_file")
+        if cached and os.path.exists(cached):
+            got = _read(cached)
+            if got:
+                cls._primary_cache = got
+                return got
+
+        # Slow path: full (recursive) glob; remember the winning file.
         found: set = set()
         for root in cls._scan_roots():
             for pat in (
@@ -589,15 +655,15 @@ class GeminiConnector(Connector):
                     files = sorted(glob.glob(pat, recursive="**" in pat))
                 except (OSError, ValueError):
                     continue
+                win = None
                 for fp in files[:120]:
-                    try:
-                        with open(fp, encoding="utf-8", errors="ignore") as f:
-                            text = f.read()
-                    except OSError:
-                        continue
-                    for m in cls._MODEL_RE.finditer(text):
-                        found.add(m.group(1))
+                    got = _read(fp)
+                    if got:
+                        found |= got
+                        win = fp
                 if found:
+                    if win:
+                        cls._remember_scan("models_file", win)
                     cls._primary_cache = found
                     return found
         cls._primary_cache = found
@@ -984,30 +1050,20 @@ class CopilotConnector(Connector):
         return None
 
     @classmethod
-    def _gh_ready(cls) -> bool:
-        """True if gh is installed AND authenticated (keyring or GITHUB_TOKEN).
-        ``gh auth status`` returns 0 in either case — one check covers both."""
-        gh = cls._gh_bin()
-        if not gh:
-            return False
-        try:
-            return subprocess.run(
-                [gh, "auth", "status"],
-                capture_output=True, text=True, timeout=5,
-            ).returncode == 0
-        except (OSError, subprocess.SubprocessError):
-            return False
-
-    @classmethod
     def available(cls, cfg: dict) -> bool:
-        """Enabled AND an authenticated gh exists.
+        """Enabled AND the ``gh`` binary is present.
 
-        The base gate only checks ``cred_paths`` on disk, but gh stores its token
-        in the OS keyring, so the dotfile alone is not enough — verify gh is
-        actually logged in (which also covers a ``GITHUB_TOKEN`` env login)."""
+        We deliberately do NOT run ``gh auth status`` here: this gate runs on
+        every poll (a fresh subprocess rebuilds the connector list each time), and
+        the auth probe costs ~1s of wall time on the panel-open path. Authentication
+        is verified implicitly by ``_api_json`` — ``gh api`` fails cleanly when not
+        logged in, the connector fetches nothing, and no row appears. So the
+        display behaviour is identical to an explicit auth gate, minus the per-poll
+        cost; and on warm polls the ConnectorCache serves the last result without
+        even reaching ``gh api``."""
         if not cfg.get("enabled"):
             return False
-        return cls._gh_ready()
+        return cls._gh_bin() is not None
 
     # -- fetch --------------------------------------------------------------
     def _api_json(self):
@@ -1078,6 +1134,132 @@ class CopilotConnector(Connector):
                 "quotas": quotas}
 
 
+class OpenrouterConnector(Connector):
+    """OpenRouter credit/spend reader — the live usage the OpenRouter dashboard
+    shows for the API key opencode (and any other agent) routes through.
+
+    OFFICIAL tier: it calls OpenRouter's own documented key endpoint
+    (``GET /api/v1/key``) with the ``OPENROUTER_API_KEY`` the shell already
+    exports on this machine — the SAME key opencode uses to route requests. It
+    reads only; it never rotates, writes, or persists the key. The key lives in
+    the environment (opencode authenticates its gateways via env vars, not a
+    readable dotfile), so this connector's credential and its double-gate are
+    both that env var — there is no local file to check.
+
+    Why this exists: opencode's recent activity is spent server-side on its
+    gateways' consoles, not in the local token ledger (which the on-by-default
+    ``opencode`` source already reads). OpenRouter is the one gateway with a
+    public usage API, so this surfaces its live credit/spend that a local read
+    physically cannot. (OpenCode Zen, opencode's other gateway, has no public
+    balance endpoint yet — GitHub issue #10448 — so it stays web-console-only
+    and ships no connector.)
+
+    Two endpoints, two different questions:
+      • ``GET /api/v1/credits`` → the ACCOUNT balance: ``total_credits`` (all $
+        ever loaded) and ``total_usage`` (all $ ever spent). Their difference is
+        the true remaining balance opencode draws down — this is the "여분양"
+        the menu bar must show, and it is the PRIMARY quota here.
+      • ``GET /api/v1/key`` → this KEY's own scope: ``usage`` (cumulative $ on
+        the key), ``limit`` / ``limit_remaining`` (a per-key cap, null when
+        uncapped), ``usage_daily`` (today's $), ``is_free_tier``. A per-key cap
+        is a narrower ceiling than the account balance, so it is folded in only
+        for today's spend and the free-tier flag; the account balance wins for
+        remaining. (Reading ``/key`` alone — which an earlier version did —
+        surfaced the tiny per-key cap instead of the real balance, so the
+        remaining amount looked exhausted even when the account had funds.)
+
+    The account quota carries ``remaining = total_credits - total_usage`` (raw
+    $, clamped at 0 for display — a negative means over-spent, i.e. $0 left),
+    ``limit = total_credits``, ``spent = total_usage`` and, when the account
+    ever loaded credit, ``remainingPercent``. Fail-silent throughout: the
+    account call is required (no balance → None); the per-key call is
+    best-effort enrichment (its failure just omits today's spend).
+    """
+
+    name = "openrouter"
+    tier = "official"
+    _ENV_KEY = "OPENROUTER_API_KEY"
+    cred_paths = ()  # credential is an env var, not a file — see available().
+
+    CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+    USAGE_URL = "https://openrouter.ai/api/v1/key"
+    _UA = "shbr-connector"
+
+    @classmethod
+    def available(cls, cfg: dict) -> bool:
+        """Enabled AND the API key is exported in the environment.
+
+        opencode authenticates its gateways via env vars rather than a readable
+        file, so the base ``cred_paths`` gate never fires. Gate on the env var
+        instead — mirroring ClaudeConnector's Keychain override."""
+        if not cfg.get("enabled"):
+            return False
+        return bool(os.environ.get(cls._ENV_KEY))
+
+    @staticmethod
+    def _num(v):
+        """Coerce a JSON number to float, or None if absent/non-numeric."""
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+
+    @classmethod
+    def _account_quota(cls, credits: dict, key_data) -> dict:
+        """Build the primary balance quota from ``/credits`` (account totals),
+        enriched with today's spend + free-tier flag from ``/key`` when present.
+
+        Returns None if the account payload lacks the totals we need."""
+        d = credits.get("data") if isinstance(credits, dict) else None
+        if not isinstance(d, dict):
+            return None
+        total = cls._num(d.get("total_credits"))
+        used = cls._num(d.get("total_usage"))
+        if total is None and used is None:
+            return None
+        # ``/key`` enrichment (best-effort — may be absent on a failed call).
+        kd = key_data.get("data") if isinstance(key_data, dict) else None
+        daily = cls._num(kd.get("usage_daily")) if isinstance(kd, dict) else None
+        free = bool(kd.get("is_free_tier")) if isinstance(kd, dict) else False
+        q = {
+            "id": "balance",
+            "window": "free" if free else "credit",
+            "resets_at": None,  # OpenRouter credit has no rolling reset.
+            "primary": True,
+        }
+        if used is not None:
+            q["spent"] = round(used, 4)
+        if daily is not None:
+            q["spentToday"] = round(daily, 4)
+        if total is not None:
+            q["limit"] = round(total, 4)
+            raw_remaining = total - (used or 0.0)
+            # Negative means the account is over its loaded credit → $0 left.
+            q["remaining"] = round(max(0.0, raw_remaining), 4)
+            if total > 0:
+                rp = max(0.0, min(100.0, raw_remaining / total * 100))
+                q["remainingPercent"] = round(rp, 1)
+                q["usedPercent"] = round(100 - rp, 1)
+        return q
+
+    def fetch(self):
+        key = os.environ.get(self._ENV_KEY)
+        if not key:
+            return None
+        headers = {"Authorization": "Bearer " + key, "Accept": "application/json",
+                   "User-Agent": self._UA}
+        # Account balance is required; per-key data is best-effort enrichment.
+        credits = self._get_json(self.CREDITS_URL, headers=headers)
+        key_data = self._get_json(self.USAGE_URL, headers=headers)
+        q = self._account_quota(credits, key_data)
+        if q is None:
+            return None
+        return {"name": self.name, "status": "live", "tier": self.tier,
+                "quotas": [q]}
+
+
 # Per-provider connectors are registered here as recon confirms an endpoint and
 # credential path for each. Empty until a concrete connector is verified — an
 # unverified provider ships no code rather than a speculative stub.
@@ -1095,6 +1277,12 @@ CONNECTOR_REGISTRY: dict = {
     # (opt-in via ``[sources.cursor_quota] enabled = true``). Its provider row is
     # still ``cursor`` (the ``name`` attr), so the quota merges into that row.
     "cursor_quota": CursorConnector,
+    # OFF by default; opt-in via ``[sources.openrouter] enabled = true``.
+    # OFFICIAL tier — OpenRouter's own ``GET /api/v1/key`` read using the
+    # ``OPENROUTER_API_KEY`` env var opencode already routes through, surfacing
+    # the gateway credit/spend a local disk read cannot see. Distinct key from
+    # the on-by-default local ``opencode`` token-ledger source.
+    "openrouter": OpenrouterConnector,
 }
 
 
@@ -1105,9 +1293,16 @@ def build_connectors(cfg) -> list:
     list whenever nothing is opted in — which is the default.
     """
     out = []
+    hidden = cfg.hidden_set()
     for name, cls in CONNECTOR_REGISTRY.items():
         cc = cfg.source(name)
         if not cc.get("enabled"):
+            continue
+        # The user hid this provider from the display — don't even build the
+        # connector, so its network fetch never runs. Keyed by display-name
+        # (``cls.name``), which can differ from the registry key
+        # (e.g. ``cursor_quota`` → row ``cursor``).
+        if getattr(cls, "name", name) in hidden:
             continue
         if not cls.available(cc):
             continue

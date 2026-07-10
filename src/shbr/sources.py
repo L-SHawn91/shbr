@@ -24,6 +24,11 @@ from pathlib import Path
 from .config import CLAUDE_MEMORY_GLOB
 from .util import now, which
 
+# SSOT for the local usage-reader provider rows: their display-names and order.
+# ``UsageSource._readers`` maps each to its ``_<name>`` method, and the
+# ``providers`` listing command enumerates these as the ``usage-reader`` tier.
+USAGE_PROVIDER_NAMES = ("codex", "claude", "gemini", "opencode")
+
 
 class Source:
     name = "base"
@@ -79,13 +84,12 @@ class UsageSource(Source):
             cfg.get("opencode_db", "~/.local/share/opencode/opencode.db"))
 
     def _readers(self):
-        """(provider_name, reader) for every known agent, screened each run."""
-        return (
-            ("codex", self._codex),
-            ("claude", self._claude),
-            ("gemini", self._gemini),
-            ("opencode", self._opencode),
-        )
+        """(provider_name, reader) for every known agent, screened each run.
+
+        Order + names mirror ``USAGE_PROVIDER_NAMES`` (the SSOT the ``providers``
+        listing command reads); each name maps to its ``_<name>`` reader method.
+        """
+        return tuple((n, getattr(self, "_" + n)) for n in USAGE_PROVIDER_NAMES)
 
     @classmethod
     def available(cls, cfg: dict) -> bool:
@@ -820,11 +824,42 @@ class SystemSource(Source):
             load1, load5, load15 = os.getloadavg()
         except (OSError, AttributeError):
             load1 = load5 = load15 = None
-        util = self._cpu_percent_linux() if sys.platform.startswith("linux") else None
+        if sys.platform.startswith("linux"):
+            util = self._cpu_percent_linux()
+        elif sys.platform == "darwin":
+            util = self._cpu_percent_darwin()
+        else:
+            util = None
+        # last resort only — a load-average proxy diverges from real CPU%
+        # (it counts I/O-blocked + runnable-waiting threads and lags ~1 min),
+        # so use it solely when the real short-window sampler is unavailable.
         if util is None and load1 is not None:
-            util = round(100 * load1 / ncpu, 1)  # saturation proxy
+            util = round(100 * load1 / ncpu, 1)
         return {"ncpu": ncpu, "load1": load1, "load5": load5,
                 "load15": load15, "util_pct": util}
+
+    def _cpu_percent_darwin(self):
+        # `top -l 2 -n 0`: two summary samples ~1s apart. The FIRST sample is
+        # cumulative-since-boot and meaningless; the SECOND reflects the real
+        # interval, matching Activity Monitor. We parse the last "CPU usage:"
+        # line and take 100 − idle (captures user+sys+nice).
+        out = self._run(["top", "-l", "2", "-n", "0"], timeout=6)
+        if not out:
+            return None
+        idle = None
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("CPU usage:"):
+                for part in s.split(","):
+                    if "idle" in part:
+                        tok = part.strip().split("%")[0].split()[-1]
+                        try:
+                            idle = float(tok)
+                        except ValueError:
+                            idle = None
+        if idle is None:
+            return None
+        return round(max(0.0, min(100.0, 100.0 - idle)), 1)
 
     def _cpu_percent_linux(self):
         def snap():
@@ -900,8 +935,13 @@ class SystemSource(Source):
         if self.temp_cmd:
             candidates.append(self.temp_cmd.split())
         if sys.platform == "darwin":
-            candidates += [["osx-cpu-temp"], ["smctemp", "-c"],
-                           ["istats", "cpu", "temp", "--value-only"]]
+            # smctemp가 Apple Silicon SMC를 실제로 읽는 유일한 후보라 1순위.
+            # -n3: SMC 읽기가 간헐 실패하면 유효값 나올 때까지 최대 3회 재시도
+            # (없으면 온도가 순간 빈값→미표시로 튄다). osx-cpu-temp는 ARM에서
+            # 항상 0.0을 뱉어 파서가 걸러내는 헛돌기라 최후순위로만 남긴다.
+            candidates += [["smctemp", "-c", "-n3"],
+                           ["istats", "cpu", "temp", "--value-only"],
+                           ["osx-cpu-temp"]]
         elif sys.platform.startswith("linux"):
             candidates += [["sensors", "-u"]]
         for cmd in candidates:

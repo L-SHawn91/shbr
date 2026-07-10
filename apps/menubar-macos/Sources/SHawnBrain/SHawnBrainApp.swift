@@ -12,11 +12,23 @@ struct SHawnBrainApp: App {
 
     var body: some Scene {
         MenuBarExtra {
+            // 팝오버가 열려 화면에 보이는 동안에만 맥동을 돌린다(닫히면 정지 →
+            // 재그리기 멈춰 App Nap/코어 슬립 허용). ContentView는 아래 창에도
+            // 떠서 각각 신호를 쏘므로 모델이 참조 카운트로 합산한다.
             ContentView(model: model)
+                .onAppear { model.panelAppeared() }
+                .onDisappear { model.panelDisappeared() }
         } label: {
-            // The always-visible menu-bar line.
-            Text(model.labelText)
-                .onAppear { model.start() }
+            // 항상 보이는 메뉴바 라인: CPU 부하로 맥동하는 두뇌 아이콘(풀컬러)
+            // + 통계 텍스트. animIndex가 갱신될 때마다 라벨이 다시 그려진다.
+            HStack(spacing: 4) {
+                Image(nsImage: BrainFrames.images[min(max(0, model.animIndex), BrainFrames.count - 1)])
+                    .renderingMode(.original)
+                if !model.labelStats.isEmpty {
+                    Text(model.labelStats)
+                }
+            }
+            .onAppear { model.start() }
         }
         .menuBarExtraStyle(.window)
 
@@ -25,6 +37,8 @@ struct SHawnBrainApp: App {
         // 푸터의 ‘창으로 열기’로 이 창을 띄운다. contentSize로 내용 크기에 맞춘다.
         Window("SHawn Brain", id: "panel") {
             ContentView(model: model)
+                .onAppear { model.panelAppeared() }
+                .onDisappear { model.panelDisappeared() }
         }
         .windowResizability(.contentSize)
 

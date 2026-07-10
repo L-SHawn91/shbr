@@ -42,7 +42,14 @@ engine; this app is a thin renderer on top of it.
 | `Sources/SHawnBrain/Snapshot.swift`     | Codable mirror of `shbr menubar --json` (the contract) |
 | `Sources/SHawnBrain/BrainModel.swift`   | runs `shbr`, decodes, refreshes on a timer; formatting helpers |
 | `Sources/SHawnBrain/SHawnBrainApp.swift`| `@main` `MenuBarExtra` scene + accessory activation policy |
+| `Sources/SHawnBrain/BrainFrames.swift`  | G1 Route A menubar frames (idle + peak glow × intensity, base64) |
 | `Sources/SHawnBrain/ContentView.swift`  | the dropdown panel |
+
+Regenerate menubar frames after SHawn-slide lock PNG changes:
+
+```bash
+python3 scripts/render_brain_frames.py --write-swift
+```
 
 The Codable models and `engine.menubar_data()` are two ends of one contract —
 change one, change the other.

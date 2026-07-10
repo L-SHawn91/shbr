@@ -5,6 +5,7 @@ the results. It knows nothing about any specific runtime.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import glob
 import os
 
@@ -21,35 +22,79 @@ def build_meter(sources) -> list:
     return out
 
 
-def apply_connectors(meters: list, connectors, cache=None) -> list:
-    """Merge opt-in connectors' live quota into the providers meter, in place.
+def _hide_providers(meters: list, hidden) -> list:
+    """Drop user-hidden provider rows from every providers meter, in place.
 
-    A connector returns the remaining-quota a local file cannot hold (see
-    ``connectors.py``). Each result is ``{"name", "quotas", ...}``; its quotas
-    land in ``providers[name]["quotas"]`` so they flow through the same render
-    path (text + JSON) as any locally-read provider. If no providers meter
-    exists yet (e.g. the local usage source is off), one is synthesised so the
-    live quota still shows. Fail-silent: a dead connector is a non-event.
-
-    ``cache`` (a ``cache.ConnectorCache``, optional) short-circuits the network:
-    a result younger than the TTL is served from disk without a fetch, a fresh
-    fetch is written back, and a failed fetch falls back to the last cached value
-    so the menu bar holds its last-known quota instead of blanking.
+    ``hidden`` is a set of provider display-names (``[providers] hidden`` in the
+    config). This is the display filter: it removes hidden rows *after* they are
+    built, so a single mechanism covers both local usage-reader providers and
+    connector-fed ones — they share the ``providers`` dict keyed by name.
     """
-    if not connectors:
+    hidden = set(hidden or ())
+    if not hidden:
         return meters
-    results = []
+    for m in meters:
+        if m.get("kind") == "providers":
+            provs = m.get("providers")
+            if provs:
+                for name in [n for n in provs if n in hidden]:
+                    del provs[name]
+    return meters
+
+
+def _fetch_connector_results(connectors, cache=None, hidden=()) -> list:
+    """Run every opt-in connector's network fetch and return the ordered result
+    list. No ``meters`` needed — so this can run concurrently with
+    ``build_meter`` (see ``build_snapshot``). The three phases (cache-hit
+    resolution → parallel fetch → cache put / stale fallback) and their ordering
+    guarantees are documented on ``apply_connectors``.
+    """
+    hidden = set(hidden or ())
+    if not connectors:
+        return []
+
+    # Phase 1 (sequential, no network): resolve the hidden filter and cache hits,
+    # and collect the connectors that still need a live fetch. Each connector
+    # keeps an ordered slot so the merged result order is identical to the old
+    # sequential loop.  slot = ["hit", result] | ["fetch", None, name]
+    slots: list = []
+    to_fetch: list = []
     for c in connectors:
         name = getattr(c, "name", None)
+        if name and name in hidden:
+            continue  # user hid this provider — do not touch the network.
         if cache is not None and name:
             hit = cache.fresh(name)
             if hit is not None:
-                results.append(hit)
+                slots.append(["hit", hit])
                 continue
-        try:
-            r = c.fetch()
-        except Exception:
-            r = None
+        slots.append(["fetch", None, name])  # r filled in after the parallel fetch
+        to_fetch.append((len(slots) - 1, c))
+
+    # Phase 2 (parallel): every connector needing the network fetches at once, so
+    # wall time collapses from sum-of-all connectors to the slowest single one —
+    # keeps the on-demand panel-open poll snappy. Fail-silent per connector: an
+    # exception (or timeout) becomes None and falls back to cache in phase 3.
+    if to_fetch:
+        def _fetch(c):
+            try:
+                return c.fetch()
+            except Exception:
+                return None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(to_fetch), 8)) as ex:
+            fetched = list(ex.map(lambda item: _fetch(item[1]), to_fetch))
+        for (idx, _c), r in zip(to_fetch, fetched):
+            slots[idx][1] = r
+
+    # Phase 3 (sequential, in original order): apply cache put / stale fallback.
+    # Cache writes stay single-threaded here so the parallel fetch never races on
+    # the cache.
+    results = []
+    for slot in slots:
+        if slot[0] == "hit":
+            results.append(slot[1])
+            continue
+        _, r, name = slot
         if r and r.get("name"):
             if cache is not None and name:
                 cache.put(name, r)
@@ -58,8 +103,20 @@ def apply_connectors(meters: list, connectors, cache=None) -> list:
             stale = cache.stale(name)
             if stale:
                 results.append(stale)
+    return results
+
+
+def _merge_connector_results(meters: list, results: list, hidden=()) -> list:
+    """Merge fetched connector results into the providers meter, in place.
+
+    The pure-CPU tail of ``apply_connectors``: no network, no ``cache`` — it only
+    folds the already-fetched ``results`` (from ``_fetch_connector_results``) into
+    ``providers[name]["quotas"]`` and drops hidden rows. Split out so the fetch can
+    overlap ``build_meter`` and only this cheap merge needs ``meters``.
+    """
+    hidden = set(hidden or ())
     if not results:
-        return meters
+        return _hide_providers(meters, hidden)
     provm = next((m for m in meters if m.get("kind") == "providers"), None)
     if provm is None:
         provm = {"kind": "providers", "source": "connectors",
@@ -73,7 +130,39 @@ def apply_connectors(meters: list, connectors, cache=None) -> list:
         p.setdefault("quotas", []).extend(r.get("quotas") or [])
         if r.get("status") and not p.get("status"):
             p["status"] = r["status"]
-    return meters
+    return _hide_providers(meters, hidden)
+
+
+def apply_connectors(meters: list, connectors, cache=None, hidden=()) -> list:
+    """Merge opt-in connectors' live quota into the providers meter, in place.
+
+    A connector returns the remaining-quota a local file cannot hold (see
+    ``connectors.py``). Each result is ``{"name", "quotas", ...}``; its quotas
+    land in ``providers[name]["quotas"]`` so they flow through the same render
+    path (text + JSON) as any locally-read provider. If no providers meter
+    exists yet (e.g. the local usage source is off), one is synthesised so the
+    live quota still shows. Fail-silent: a dead connector is a non-event.
+
+    ``cache`` (a ``cache.ConnectorCache``, optional) short-circuits the network:
+    a result younger than the TTL is served from disk without a fetch, a fresh
+    fetch is written back, and a failed fetch falls back to the last cached value
+    so the menu bar holds its last-known quota instead of blanking.
+
+    ``hidden`` (provider display-names) is the single choke point for the
+    user's on/off choice: a hidden connector is skipped *before* its network
+    fetch, and hidden rows are dropped from the providers meter on every return
+    path — so hiding a name suppresses both its local-usage row and its
+    connector fetch at once.
+
+    Serial convenience wrapper (fetch → merge) kept for the ``cli`` cmd_meter
+    path; ``build_snapshot`` calls the two halves separately so the fetch can
+    overlap the host meter.
+    """
+    hidden = set(hidden or ())
+    if not connectors:
+        return _hide_providers(meters, hidden)
+    results = _fetch_connector_results(connectors, cache, hidden)
+    return _merge_connector_results(meters, results, hidden)
 
 
 def _render_providers(m: list, lines: list) -> None:
@@ -421,8 +510,27 @@ def render_sessions(data: dict) -> list:
 
 
 # --------------------------------------------------------------- snapshot
-def build_snapshot(sources, connectors=(), cache=None) -> dict:
-    meters = apply_connectors(build_meter(sources), connectors, cache)
+def meters_with_connectors(sources, connectors=(), cache=None, hidden=()):
+    """Build the host meters and fold in connector quota rows, overlapping the two.
+
+    The host meter (top -l 2, ~1.5s) and the connector network fetch (~1s) are
+    independent until the final merge, so we run the fetch on a worker while
+    build_meter runs here, then fold the results in. Every poll pays
+    max(meter, fetch) instead of their sum. Both build_snapshot and the menu-bar
+    payload go through here so the overlap is applied on every poll path.
+    """
+    hidden = set(hidden or ())
+    if connectors:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_fetch_connector_results, connectors, cache, hidden)
+            meters = build_meter(sources)
+            results = fut.result()
+        return _merge_connector_results(meters, results, hidden)
+    return _hide_providers(build_meter(sources), hidden)
+
+
+def build_snapshot(sources, connectors=(), cache=None, hidden=()) -> dict:
+    meters = meters_with_connectors(sources, connectors, cache, hidden)
     inv = scan_memory(sources)
     sessions = build_sessions(sources, 24.0)
     return {

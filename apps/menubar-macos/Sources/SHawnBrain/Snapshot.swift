@@ -185,3 +185,20 @@ struct Session: Decodable {
         case startedAt = "started_at"
     }
 }
+
+// `shbr providers --json` 페이로드 — 설정의 "모델" 탭 전용이며 menubar 스냅샷과는
+// 별개 shape이다. cli._provider_rows()가 내보내는 계약과 동기화 유지.
+struct ProvidersPayload: Decodable {
+    var providers: [ProviderRow]
+}
+
+// 알려진 제공자 한 줄: 표시 이름 + 어느 레이어(usage/connector)에서 오는지 +
+// 커넥터 tier(official/gray/local) + 자격증명 활성 여부 + 현재 숨김 여부.
+struct ProviderRow: Decodable, Identifiable {
+    var name: String
+    var layers: [String]
+    var tier: String
+    var enabled: Bool
+    var hidden: Bool
+    var id: String { name }
+}

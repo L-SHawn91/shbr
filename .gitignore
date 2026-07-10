@@ -10,6 +10,7 @@ venv/
 # Swift menu-bar app build artifacts
 apps/menubar-macos/.build/
 apps/menubar-macos/.swiftpm/
+apps/menubar-macos/scripts/.generated_frames/
 # never commit a private deployment config
 config.toml
 config.local.toml

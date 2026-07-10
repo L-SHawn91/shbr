@@ -88,6 +88,24 @@ Everything else is opt-in. See [`config.example.toml`](config.example.toml) for
 how to point `shbr` at additional runtimes (the shipped example includes a
 commented `hermes` adapter for a local SQLite-backed agent).
 
+## Live Quota Connectors
+
+The default sources never call provider APIs. Live quota connectors are a
+separate, opt-in layer for providers that do not keep a complete local usage
+ledger.
+
+Connector rules:
+
+- off by default;
+- reuse only credentials that the provider's own CLI/app already stored locally;
+- never write refreshed credentials back to disk;
+- fail silently on network/auth/parse errors;
+- return quota metadata only;
+- label each endpoint as `official` or `gray`.
+
+This keeps the OSS core useful without forcing users to trust a proxy or hand
+over API keys.
+
 ## Configuration
 
 `shbr` looks for config in this order: `--config <path>` → `$SHBR_CONFIG` →

@@ -1,5 +1,29 @@
 import SwiftUI
+import AppKit
 import ServiceManagement
+
+// 메뉴바 팝오버는 macOS가 NSPanel로 만들어 아이콘 밑에 고정하지만, 그 창의
+// isMovableByWindowBackground를 켜면 사용자가 패널의 빈 배경(카드 사이 여백·
+// 헤더 등)을 잡고 원하는 위치로 끌어 옮길 수 있다. 버튼·스크롤·메뉴는 각자
+// 마우스 이벤트를 가로채므로 배경 드래그가 시작되지 않아 상호작용과 충돌하지
+// 않는다. 같은 ContentView를 쓰는 독립 창(id:"panel")에도 무해하게 적용된다.
+private struct WindowAccessor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let probe = NSView()
+        DispatchQueue.main.async { [weak probe] in
+            guard let window = probe?.window else { return }
+            window.isMovable = true
+            window.isMovableByWindowBackground = true
+        }
+        return probe
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // 창이 재생성되며 뒤늦게 붙는 경우(팝오버 재오픈)에도 다시 보장한다.
+        guard let window = nsView.window else { return }
+        window.isMovable = true
+        window.isMovableByWindowBackground = true
+    }
+}
 
 // User-selectable panel layout. MenuBarExtra(.window) auto-sizes to its content
 // and macOS blocks drag-to-resize, so instead of size tiers (which looked
@@ -262,7 +286,7 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text("🧠").font(.title3)
+            BrainMarkLive(model: model, size: 30)
             VStack(alignment: .leading, spacing: 0) {
                 Text("SHawn Brain").font(.headline)
                 HStack(spacing: 4) {
@@ -277,7 +301,7 @@ struct ContentView: View {
                 }
             }
             Spacer()
-            Button(action: { model.refresh() }) {
+            Button(action: { model.refresh(manual: true) }) {
                 Image(systemName: "arrow.clockwise").font(.system(size: 12, weight: .semibold))
             }
             .buttonStyle(.plain)
@@ -421,7 +445,7 @@ struct ContentView: View {
                         GaugeRing(value: sys.temperatureC.map { min(max($0 / 100, 0), 1) },
                                   display: sys.temperatureC.map { "\(Int($0.rounded()))°" } ?? "–",
                                   caption: "TEMP",
-                                  sub: sys.temperatureC != nil ? "CPU" : nil,
+                                  sub: sys.temperatureC != nil ? "CPU °C" : nil,
                                   accent: tempColor(sys.temperatureC))
                     }
                 }
@@ -892,8 +916,14 @@ struct ContentView: View {
     private func ringButton<Content: View>(_ dest: Route, enabled: Bool,
                                            @ViewBuilder _ content: () -> Content) -> some View {
         if enabled {
-            Button(action: { route.append(dest) }) { content() }
-                .buttonStyle(.plain)
+            // contentShape(Rectangle()): GaugeRing은 원 stroke + 중앙 텍스트라
+            // 내부가 대부분 투명하다. 이게 없으면 plain 버튼은 불투명 픽셀만
+            // 히트테스트해 링 여백/도넛 홀 클릭이 무시된다(정확히 링 위를 눌러야만
+            // 반응 → 이동이 느리게 체감). 프레임 전체를 탭 대상으로 만든다.
+            Button(action: { route.append(dest) }) {
+                content().contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         } else {
             content()
         }
@@ -1026,9 +1056,10 @@ struct SettingsView: View {
                     switch tab {
                     case .general: GeneralPane(model: model)
                     case .menubar: MenuBarPane(model: model)
+                    case .models:  ModelsPane(model: model)
                     case .panel:   PanelPane()
                     case .theme:   ThemePane(model: model)
-                    case .about:   AboutPane()
+                    case .about:   AboutPane(model: model)
                     }
                 }
                 .padding(18)
@@ -1045,7 +1076,7 @@ struct SettingsView: View {
     private var rail: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("🧠").font(.system(size: 30))
+                BrainMarkLive(model: model, size: 34)
                 Text("SHawn Brain")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                 Text("로컬 관측 레이어")
@@ -1080,12 +1111,13 @@ struct SettingsView: View {
 
 // 설정 탭 정의 — 아이콘·제목·강조색을 한 곳에서 관리.
 private enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, menubar, panel, theme, about
+    case general, menubar, models, panel, theme, about
     var id: String { rawValue }
     var title: String {
         switch self {
         case .general: "일반"
         case .menubar: "메뉴바"
+        case .models:  "모델"
         case .panel:   "패널"
         case .theme:   "테마"
         case .about:   "정보"
@@ -1095,6 +1127,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: "gearshape.fill"
         case .menubar: "menubar.rectangle"
+        case .models:  "square.stack.3d.up.fill"
         case .panel:   "rectangle.split.2x1.fill"
         case .theme:   "paintpalette.fill"
         case .about:   "sparkles"
@@ -1104,6 +1137,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: Theme.blue
         case .menubar: Theme.brand
+        case .models:  Theme.ok
         case .panel:   Theme.teal
         case .theme:   Theme.purple
         case .about:   Theme.accent
@@ -1210,6 +1244,111 @@ private struct SwitchRow: View {
     }
 }
 
+// MARK: 모델
+
+// 알려진 AI 제공자를 켜고/끄는(메뉴바 미터에 표시/숨김) 설정 탭. 목록은
+// `shbr providers --json`이 채우고, 토글은 `shbr providers hide|show <name>`로
+// `[providers] hidden`에 영속화된다 — 자격증명(enabled)과는 별개의 표시 선택.
+private struct ModelsPane: View {
+    @ObservedObject var model: BrainModel
+
+    var body: some View {
+        PaneTitle(title: "모델",
+                  subtitle: "메뉴바 미터에 어떤 제공자를 보일지 켜고 끕니다.")
+
+        Card(title: "제공자", icon: "square.stack.3d.up.fill") {
+            if model.providers.isEmpty {
+                Text("제공자 목록을 불러오는 중…")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(model.providers.enumerated()), id: \.element.id) { idx, row in
+                        if idx > 0 { Divider().opacity(0.5) }
+                        ProviderToggleRow(row: row) { show in
+                            model.toggleProvider(name: row.name, hide: !show)
+                        }
+                    }
+                }
+            }
+        }
+
+        Text("끄면 메뉴바 미터에서만 숨겨집니다. 자격증명이 없는 제공자는 데이터가 "
+             + "없어 흐리게 표시되며, 켜 두어도 값이 나타나지 않습니다. 이 선택은 "
+             + "~/.config/shbr/config.toml 의 [providers] hidden 에 저장됩니다.")
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .onAppear { model.fetchProviders() }
+    }
+}
+
+// 제공자 한 줄 — 이름 + tier 배지 + 자격증명/레이어 부제 + 표시 스위치.
+// 스위치 켬 = 표시(hidden 아님). 값 변화는 onChange로 상위에 전달한다.
+private struct ProviderToggleRow: View {
+    let row: ProviderRow
+    let onChange: (Bool) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(row.name)
+                        .font(.system(size: 13, weight: .medium))
+                    TierBadge(tier: row.tier)
+                }
+                Text(subtitle)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Toggle("", isOn: Binding(
+                get: { !row.hidden },
+                set: { onChange($0) }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+        }
+        .padding(.vertical, 7)
+        .opacity(row.enabled ? 1 : 0.55)
+    }
+
+    private var subtitle: String {
+        let state = row.enabled ? "활성" : "자격증명 없음"
+        let layers = row.layers.joined(separator: "+")
+        return layers.isEmpty ? state : "\(state) · \(layers)"
+    }
+}
+
+// tier 배지 — 공식/비공식/로컬을 색으로 구분하는 작은 캡슐.
+private struct TierBadge: View {
+    let tier: String
+
+    var body: some View {
+        Text(label)
+            .font(.system(size: 9, weight: .bold))
+            .textCase(.uppercase)
+            .kerning(0.3)
+            .foregroundStyle(color)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(
+                Capsule().fill(color.opacity(0.15))
+            )
+    }
+
+    private var label: String {
+        switch tier {
+        case "official": "공식"
+        case "gray":     "비공식"
+        default:          "로컬"
+        }
+    }
+    private var color: Color {
+        switch tier {
+        case "official": Theme.ok
+        case "gray":     Theme.warn
+        default:          Theme.blue
+        }
+    }
+}
+
 // MARK: 일반
 
 private struct GeneralPane: View {
@@ -1285,13 +1424,19 @@ private struct MenuBarPane: View {
     @ObservedObject var model: BrainModel
 
     var body: some View {
-        PaneTitle(title: "메뉴바", subtitle: "메뉴바 라벨에 표시할 항목을 고릅니다. 🧠 아이콘은 항상 남습니다.")
+        PaneTitle(title: "메뉴바", subtitle: "메뉴바 라벨에 표시할 항목을 고릅니다. 두뇌 아이콘은 항상 남습니다.")
 
         // 실제 메뉴바 목업 위에 현재 라벨을 렌더 — 켜고 끌 때 바로 반영된다.
         Card(title: "미리보기", icon: "eye") {
             HStack(spacing: 10) {
                 Spacer()
-                Text(model.labelText)
+                HStack(spacing: 4) {
+                    Image(nsImage: BrainFrames.images[BrainFrames.count - 1])
+                        .renderingMode(.original)
+                    if !model.labelStats.isEmpty {
+                        Text(model.labelStats)
+                    }
+                }
                     .font(.system(size: 13, design: .rounded))
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(RoundedRectangle(cornerRadius: 6)
@@ -1348,7 +1493,7 @@ private struct PanelPane: View {
                     }
                 }
             }
-            Text("메뉴바 팝오버는 macOS가 아이콘에 고정합니다. 창을 옮기려면 패널 하단의 ‘창으로 열기’를 사용하세요.")
+            Text("메뉴바 팝오버는 macOS가 아이콘 밑에 띄우지만, 패널의 빈 배경을 잡고 끌면 원하는 위치로 옮길 수 있습니다. (다시 열면 아이콘 밑으로 돌아갑니다.)")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -1524,11 +1669,18 @@ private struct AppearanceCard: View {
 // MARK: 정보
 
 private struct AboutPane: View {
+    @ObservedObject var model: BrainModel
     private var version: String {
         let info = Bundle.main.infoDictionary
         let v = info?["CFBundleShortVersionString"] as? String
-        let b = info?["CFBundleVersion"] as? String
-        let joined = [v, b].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        // dev 채널이면 버전 옆에 "dev · <sha>"를 붙여 실사용판과 배포판을 눈으로 구분.
+        let channel = (info?["SHBRChannel"] as? String) ?? "dev"
+        let build = info?["SHBRBuild"] as? String
+        var tail: [String] = []
+        if channel != "release" { tail.append("dev") }
+        if let build, !build.isEmpty, build != "unknown" { tail.append(build) }
+        let joined = [v, tail.isEmpty ? nil : tail.joined(separator: " · ")]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         return joined.isEmpty ? "dev build" : joined
     }
 
@@ -1537,7 +1689,7 @@ private struct AboutPane: View {
 
         Card {
             HStack(spacing: 14) {
-                Text("🧠").font(.system(size: 42))
+                BrainMarkLive(model: model, size: 46)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("SHawn Brain")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
@@ -1550,9 +1702,55 @@ private struct AboutPane: View {
             }
         }
 
-        Text("읽기 전용 · 메타데이터만 · 표준 라이브러리 엔진")
+        Card(title: "링크", icon: "link") {
+            VStack(alignment: .leading, spacing: 0) {
+                AboutLink(icon: "chevron.left.forwardslash.chevron.right",
+                          title: "GitHub — shbr",
+                          detail: "github.com/L-SHawn91/shbr",
+                          url: "https://github.com/L-SHawn91/shbr")
+                Divider().padding(.vertical, 8)
+                AboutLink(icon: "person.crop.circle",
+                          title: "SHawn",
+                          detail: "github.com/L-SHawn91",
+                          url: "https://github.com/L-SHawn91")
+            }
+        }
+
+        Text("© SHawn · Apache-2.0 · 읽기 전용 · 메타데이터만")
             .font(.caption2).foregroundStyle(.tertiary)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.top, 2)
+    }
+}
+
+// 정보 탭의 외부 링크 한 행 — 아이콘 + 제목/주소, 클릭 시 기본 브라우저로 연다.
+private struct AboutLink: View {
+    let icon: String
+    let title: String
+    let detail: String
+    let url: String
+    var body: some View {
+        Link(destination: URL(string: url)!) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.primary)
+                    Text(detail)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }

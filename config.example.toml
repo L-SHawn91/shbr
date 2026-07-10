@@ -61,3 +61,27 @@ enabled = true
 # enabled = true
 # db = "~/.hermes/state.db"                 # opened strictly read-only
 # memory_glob = "~/.hermes/memories/*.md"
+
+# ---- opt-in: live quota connectors -----------------------------------------
+# Connectors call provider usage/quota APIs and are OFF by default. Enable only
+# the providers you want to query. Each connector reuses credentials that the
+# provider's own CLI/app already stored locally; shbr does not prompt for or save
+# new secrets. Failed auth/network reads are omitted from output.
+
+# [sources.claude_quota]
+# enabled = true
+
+# [sources.codex_quota]
+# enabled = true
+
+# [sources.gemini_quota]
+# enabled = true
+
+# [sources.cursor_quota]
+# enabled = true
+
+# [sources.copilot_quota]
+# enabled = true
+
+# [sources.openrouter]
+# enabled = true

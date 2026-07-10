@@ -1311,13 +1311,19 @@ private struct ProviderToggleRow: View {
     }
 
     private var subtitle: String {
-        let state = row.enabled ? "활성" : "자격증명 없음"
-        let layers = row.layers.joined(separator: "+")
-        return layers.isEmpty ? state : "\(state) · \(layers)"
+        var bits: [String] = []
+        if row.localEnabled == true { bits.append("로컬 읽기") }
+        if row.connectorEnabled == true {
+            bits.append("옵트인 네트워크")
+        } else if row.layers.contains("connector") {
+            bits.append("네트워크 꺼짐")
+        }
+        if bits.isEmpty { bits.append(row.enabled ? "활성" : "비활성") }
+        return bits.joined(separator: " · ")
     }
 }
 
-// tier 배지 — 공식/비공식/로컬을 색으로 구분하는 작은 캡슐.
+// 신뢰 tier 배지 — 공개 문서 API/실험적 내부 API/로컬 읽기를 구분한다.
 private struct TierBadge: View {
     let tier: String
 
@@ -1335,16 +1341,16 @@ private struct TierBadge: View {
 
     private var label: String {
         switch tier {
-        case "official": "공식"
-        case "gray":     "비공식"
-        default:          "로컬"
+        case "documented":   "문서화"
+        case "experimental": "실험적"
+        default:               "로컬"
         }
     }
     private var color: Color {
         switch tier {
-        case "official": Theme.ok
-        case "gray":     Theme.warn
-        default:          Theme.blue
+        case "documented":   Theme.ok
+        case "experimental": Theme.warn
+        default:               Theme.blue
         }
     }
 }

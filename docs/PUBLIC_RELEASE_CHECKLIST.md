@@ -9,7 +9,7 @@ Use this before creating the public remote or pushing a release branch.
 - Recommended first public branch: the read-only core plus documented opt-in
   connector boundary.
 - Do not make a connector-heavy WIP branch the default until the README clearly
-  labels official vs gray connectors.
+  labels documented vs experimental connectors and declares their hosts.
 
 ## Preflight
 
@@ -20,6 +20,8 @@ Use this before creating the public remote or pushing a release branch.
 - README explains default sources and opt-in connector behavior.
 - `python3 -m compileall -q src/shbr` passes.
 - `python3 -m shbr --help` works from the checkout.
+- `python3 -m unittest discover -s tests -v` passes.
+- `python3 -m shbr doctor --json` contains no credential values.
 - macOS app build checked when app changes are included:
   `cd apps/menubar-macos && swift build -c release`.
 
@@ -29,7 +31,8 @@ Use this before creating the public remote or pushing a release branch.
 - screenshots that reveal local paths, account names, private project names, or
   usage details;
 - generated assets that include private brand work;
-- provider-specific reverse-engineered endpoints before they are labeled `gray`;
+- provider-specific internal/reverse-engineered endpoints before they are
+  labeled `experimental`;
 - personal SHawn/SHide/SHio routing notes.
 
 ## Monetization Track

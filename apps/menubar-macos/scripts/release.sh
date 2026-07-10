@@ -19,8 +19,10 @@ set -euo pipefail
 
 HERE="${0:A:h}"
 ROOT="${HERE:h}"
+REPO_ROOT="${ROOT:h:h}"
 APP="SHawnBrain"
-VERSION="0.1.0"
+VERSION="$(awk -F '"' '/^__version__ = / {print $2; exit}' "$REPO_ROOT/src/shbr/__init__.py")"
+[[ -n "$VERSION" ]] || { echo "!! could not resolve shbr version"; exit 1; }
 DIST="$ROOT/dist"
 APPDIR="$DIST/$APP.app"
 DMG="$DIST/$APP-$VERSION.dmg"

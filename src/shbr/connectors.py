@@ -19,15 +19,13 @@ Design contract — every connector obeys all of it:
   * DOUBLE GATE. Even when enabled, a connector loads only if the credential it
     needs already exists on disk. It never prompts for, stores, or transmits a
     new secret; it reuses what the provider's own tool put there.
-  * TIER-LABELLED. Each connector declares ``tier``: ``"official"`` (a
-    documented, provider-sanctioned usage endpoint) or ``"gray"`` (an
-    undocumented/reverse-engineered endpoint — used at the user's own risk, and
-    surfaced as such). The engine and README label gray connectors explicitly;
-    nothing gray is ever presented as sanctioned.
-  * READ-ONLY OVER THE WIRE. GET-style usage reads only. A connector never
-    mutates provider-side state and never edits a local settings file. Enabling
-    a provider's own telemetry (a separate, opt-in, diff-shown action) is out of
-    scope here.
+  * TRUST-LABELLED. Each connector declares ``tier``: ``"documented"`` only
+    for a publicly documented provider API, or ``"experimental"`` for an
+    undocumented/internal/reverse-engineered endpoint. A first-party hostname
+    alone is never treated as proof that an API is public or supported.
+  * NON-DESTRUCTIVE. Usage reads and OAuth refreshes may use GET or POST, but a
+    connector never changes provider account content and never edits a local
+    credential/settings file. Refreshed access tokens remain in memory only.
   * FAIL SILENT. Any network/parse/auth failure returns ``None``. A dead or
     slow endpoint must never blank the local screen or raise into the engine.
   * STDLIB ONLY. Network I/O goes through ``urllib`` — no third-party deps, in
@@ -65,8 +63,10 @@ class Connector:
     """Base opt-in provider connector. See module docstring for the contract."""
 
     name = "base"
-    #: "official" (documented, sanctioned endpoint) or "gray" (undocumented).
-    tier = "gray"
+    #: "documented" (public provider API) or "experimental" (internal/undocumented).
+    tier = "experimental"
+    #: Remote hosts a connector may contact after explicit opt-in.
+    hosts: tuple = ()
     #: Local credential paths this connector reuses; existence is the gate.
     cred_paths: tuple = ()
 
@@ -116,7 +116,7 @@ class ClaudeConnector(Connector):
     """Claude Code remaining-quota reader — the live per-window limit that no
     local file contains.
 
-    OFFICIAL tier: it calls Anthropic's own OAuth usage endpoint
+    EXPERIMENTAL tier: it calls Anthropic's own OAuth usage endpoint
     (``/api/oauth/usage``) with the access token Claude Code already stored on
     this machine — the same credential the CLI itself uses. It reads only; it
     never refreshes, rotates, or writes the token back.
@@ -133,7 +133,8 @@ class ClaudeConnector(Connector):
     """
 
     name = "claude"
-    tier = "official"
+    tier = "experimental"
+    hosts = ("api.anthropic.com",)
     cred_paths = ("~/.claude/.credentials.json",)
 
     USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -279,7 +280,7 @@ class CodexConnector(Connector):
     """Codex (ChatGPT) remaining-quota reader — the live rolling-window limits
     the Codex CLI itself shows, which no local file contains.
 
-    OFFICIAL tier: it calls ChatGPT's own Codex usage endpoint
+    EXPERIMENTAL tier: it calls ChatGPT's undocumented Codex usage endpoint
     (``/backend-api/codex/usage``) with the access token the Codex CLI already
     stored in ``~/.codex/auth.json`` — the same credential the CLI uses. It reads
     only. The one write it ever performs is an OAuth *refresh* (a standard
@@ -297,7 +298,8 @@ class CodexConnector(Connector):
     """
 
     name = "codex"
-    tier = "official"
+    tier = "experimental"
+    hosts = ("chatgpt.com", "auth.openai.com")
     cred_paths = ("~/.codex/auth.json",)
 
     USAGE_URLS = (
@@ -450,7 +452,7 @@ class GeminiConnector(Connector):
     """Gemini (Google Code Assist) remaining-quota reader — the live per-model
     daily request limits Google returns, which no local file contains.
 
-    OFFICIAL tier: it calls Google's own Code Assist internal endpoint
+    EXPERIMENTAL tier: it calls Google's Code Assist internal endpoint
     (``cloudcode-pa.googleapis.com/v1internal``) with the OAuth credential the
     Gemini CLI already stored in ``~/.gemini/oauth_creds.json`` — the same login
     the CLI itself uses. It reads only. The one write it ever performs is an
@@ -475,7 +477,8 @@ class GeminiConnector(Connector):
     """
 
     name = "gemini"
-    tier = "official"
+    tier = "experimental"
+    hosts = ("cloudcode-pa.googleapis.com", "oauth2.googleapis.com")
     cred_paths = (
         "~/.gemini/oauth_creds.json",
         "~/.gemini/antigravity-cli/oauth_creds.json",
@@ -857,7 +860,7 @@ class AntigravityConnector(GeminiConnector):
     """
 
     name = "antigravity"
-    tier = "official"
+    tier = "experimental"
     cred_paths = ("~/.gemini/antigravity-cli/antigravity-oauth-token",)
 
     def _creds(self) -> dict:
@@ -880,7 +883,7 @@ class CursorConnector(Connector):
     """Cursor subscription-consumption reader — the live "구독 소모량" the Cursor
     dashboard shows, which no local file records.
 
-    GRAY tier: the endpoint (``/api/usage-summary``) is undocumented and was
+    EXPERIMENTAL tier: the endpoint (``/api/usage-summary``) is undocumented and was
     confirmed by recon, not published by Cursor. It authenticates with the
     session token the Cursor IDE already stored on this machine — the same
     credential the app itself uses — and only ever issues a read GET. The token
@@ -902,7 +905,8 @@ class CursorConnector(Connector):
     """
 
     name = "cursor"
-    tier = "gray"
+    tier = "experimental"
+    hosts = ("cursor.com",)
     cred_paths = (
         "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
     )
@@ -1005,7 +1009,7 @@ class CopilotConnector(Connector):
     """GitHub Copilot premium-request quota reader — the "구독 소모량" for the
     monthly premium-interaction allowance no local file records.
 
-    GRAY tier: the endpoint (``copilot_internal/user``) is undocumented and was
+    EXPERIMENTAL tier: the endpoint (``copilot_internal/user``) is undocumented and was
     confirmed by recon, not published by GitHub. It reuses the GitHub credential
     the ``gh`` CLI already stored on this machine — the SAME login the user set up
     for GitHub — by shelling out to ``gh api`` (a read GET). Going through ``gh``
@@ -1025,7 +1029,8 @@ class CopilotConnector(Connector):
     """
 
     name = "copilot"
-    tier = "gray"
+    tier = "experimental"
+    hosts = ("api.github.com",)
     # gh keeps its token in the OS keyring, not this file; presence still signals
     # a configured gh, and ``available`` also accepts an authenticated gh / env
     # token, mirroring ClaudeConnector's Keychain override.
@@ -1138,7 +1143,7 @@ class OpenrouterConnector(Connector):
     """OpenRouter credit/spend reader — the live usage the OpenRouter dashboard
     shows for the API key opencode (and any other agent) routes through.
 
-    OFFICIAL tier: it calls OpenRouter's own documented key endpoint
+    DOCUMENTED tier: it calls OpenRouter's documented key and credits endpoints
     (``GET /api/v1/key``) with the ``OPENROUTER_API_KEY`` the shell already
     exports on this machine — the SAME key opencode uses to route requests. It
     reads only; it never rotates, writes, or persists the key. The key lives in
@@ -1177,7 +1182,8 @@ class OpenrouterConnector(Connector):
     """
 
     name = "openrouter"
-    tier = "official"
+    tier = "documented"
+    hosts = ("openrouter.ai",)
     _ENV_KEY = "OPENROUTER_API_KEY"
     cred_paths = ()  # credential is an env var, not a file — see available().
 
@@ -1278,7 +1284,7 @@ CONNECTOR_REGISTRY: dict = {
     # still ``cursor`` (the ``name`` attr), so the quota merges into that row.
     "cursor_quota": CursorConnector,
     # OFF by default; opt-in via ``[sources.openrouter] enabled = true``.
-    # OFFICIAL tier — OpenRouter's own ``GET /api/v1/key`` read using the
+    # DOCUMENTED tier — OpenRouter's ``GET /api/v1/key`` read using the
     # ``OPENROUTER_API_KEY`` env var opencode already routes through, surfacing
     # the gateway credit/spend a local disk read cannot see. Distinct key from
     # the on-by-default local ``opencode`` token-ledger source.

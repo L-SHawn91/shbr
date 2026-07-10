@@ -31,14 +31,17 @@ swift build -c release
 
 ## Connector Rules
 
-New live quota connectors must be off by default and registered through the
-connector registry. A connector must declare whether it is:
+New live quota connectors must be off by default, declare their remote hosts,
+and be registered through the connector registry. A connector must declare
+whether it is:
 
-- `official`: provider-sanctioned or documented enough to rely on publicly;
-- `gray`: undocumented or reverse-engineered, shown with an explicit warning.
+- `documented`: backed by a publicly documented provider API;
+- `experimental`: undocumented, internal, or reverse-engineered and shown with
+  an explicit warning.
 
-If the provider has no stable usage API, prefer documenting the gap over shipping
-a speculative connector.
+First-party ownership of a hostname is not documentation. If the provider has
+no stable usage API, prefer documenting the gap over shipping a speculative
+connector.
 
 ## Pull Requests
 

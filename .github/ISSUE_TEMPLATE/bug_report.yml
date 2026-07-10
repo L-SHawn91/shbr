@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a reproducible shbr failure without sharing private data.
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Run `shbr doctor`; home paths are shortened to `~`. Still review the output before pasting. Never include credentials, prompts, or transcripts."
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Redacted shbr doctor output
+      render: shell
+  - type: dropdown
+    id: connector
+    attributes:
+      label: Were experimental connectors enabled?
+      options: ["No", "Yes", "Unknown"]
+    validations:
+      required: true

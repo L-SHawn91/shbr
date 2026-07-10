@@ -1,13 +1,30 @@
 [project]
 name = "shbr"
-version = "0.1.0"
-description = "Local-first, zero-instrumentation observability for CLI AI agents"
+dynamic = ["version"]
+description = "Local activity cockpit for CLI AI agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "SHawn Brain" }]
 keywords = ["observability", "ai-agents", "cli", "tokens", "memory", "local-first"]
 dependencies = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/L-SHawn91/shbr"
+Issues = "https://github.com/L-SHawn91/shbr/issues"
 
 [project.scripts]
 shbr = "shbr.cli:main"
@@ -18,3 +35,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shbr"]
+
+[tool.hatch.version]
+path = "src/shbr/__init__.py"

@@ -193,12 +193,21 @@ struct ProvidersPayload: Decodable {
 }
 
 // 알려진 제공자 한 줄: 표시 이름 + 어느 레이어(usage/connector)에서 오는지 +
-// 커넥터 tier(official/gray/local) + 자격증명 활성 여부 + 현재 숨김 여부.
+// 커넥터 신뢰 tier(documented/experimental/local) + 로컬/네트워크 활성 상태 + 숨김 여부.
 struct ProviderRow: Decodable, Identifiable {
     var name: String
     var layers: [String]
     var tier: String
     var enabled: Bool
+    var localEnabled: Bool?
+    var connectorEnabled: Bool?
+    var hosts: [String]?
     var hidden: Bool
     var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name, layers, tier, enabled, hosts, hidden
+        case localEnabled = "local_enabled"
+        case connectorEnabled = "connector_enabled"
+    }
 }

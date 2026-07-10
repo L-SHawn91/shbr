@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import re
+import sys
+from pathlib import Path
 
 from . import APP_NAME, __version__
 from . import config, engine
@@ -128,6 +131,114 @@ def cmd_config(args, ctx: Ctx):
     print(f"active sources: {', '.join(ctx.source_names()) or '(none)'}")
 
 
+# -------------------------------------------------------------- safe doctor
+def _redact_home(path) -> str | None:
+    if path is None:
+        return None
+    value = str(path)
+    home = str(Path.home())
+    if value == home:
+        return "~"
+    prefix = home + "/"
+    return "~/" + value[len(prefix):] if value.startswith(prefix) else value
+
+
+def _doctor_report(ctx: Ctx) -> dict:
+    """Return a redaction-safe installation and trust-boundary report.
+
+    This command never fetches quota data and never emits credential values.
+    ``available`` checks may test for an existing file/keychain entry/binary,
+    but the report contains only booleans and declared remote hostnames.
+    """
+    from .connectors import CONNECTOR_REGISTRY
+
+    connectors = []
+    experimental = []
+    for key, cls in CONNECTOR_REGISTRY.items():
+        cc = ctx.cfg.source(key)
+        enabled = bool(cc.get("enabled"))
+        available = False
+        if enabled:
+            try:
+                available = bool(cls.available(cc))
+            except Exception:
+                available = False
+        tier = getattr(cls, "tier", "experimental")
+        item = {
+            "key": key,
+            "provider": getattr(cls, "name", key),
+            "enabled": enabled,
+            "runtime_gate_available": available,
+            "tier": tier,
+            "hosts": list(getattr(cls, "hosts", ()) or ()),
+        }
+        connectors.append(item)
+        if enabled and tier == "experimental":
+            experimental.append(key)
+
+    enabled_connectors = [c for c in connectors if c["enabled"]]
+    checks = [
+        {
+            "id": "python",
+            "status": "pass" if sys.version_info >= (3, 11) else "fail",
+            "detail": f"Python {platform.python_version()} (requires >=3.11)",
+        },
+        {
+            "id": "local_sources",
+            "status": "pass" if ctx.source_names() else "warn",
+            "detail": ", ".join(ctx.source_names()) or "no readable sources detected",
+        },
+        {
+            "id": "network_opt_in",
+            "status": "pass" if not enabled_connectors else "warn",
+            "detail": "all network connectors are off" if not enabled_connectors
+                      else "enabled: " + ", ".join(c["key"] for c in enabled_connectors),
+        },
+        {
+            "id": "experimental_connectors",
+            "status": "pass" if not experimental else "warn",
+            "detail": "none enabled" if not experimental
+                      else "enabled: " + ", ".join(experimental),
+        },
+    ]
+    return {
+        "app": APP_NAME,
+        "version": __version__,
+        "platform": platform.platform(),
+        "config": {
+            "path": _redact_home(ctx.cfg.path),
+            "using_defaults": ctx.cfg.path is None,
+            "state_dir": _redact_home(ctx.cfg.state_dir),
+        },
+        "sources": ctx.source_names(),
+        "connectors": connectors,
+        "checks": checks,
+        "redaction_safe": True,
+    }
+
+
+def cmd_doctor(args, ctx: Ctx):
+    report = _doctor_report(ctx)
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    print(f"{APP_NAME} {__version__} doctor")
+    print(f"config: {report['config']['path'] or '(built-in defaults)'}")
+    for check in report["checks"]:
+        print(f"[{check['status'].upper():4}] {check['id']}: {check['detail']}")
+    enabled = [c for c in report["connectors"] if c["enabled"]]
+    if enabled:
+        print("network connectors (explicit opt-in):")
+        for c in enabled:
+            hosts = ",".join(c["hosts"]) or "(undeclared)"
+            ready = "runtime gate ready" if c["runtime_gate_available"] else "runtime gate unavailable"
+            print(f"  {c['key']}: {c['tier']} · {ready} · hosts={hosts}")
+    else:
+        print("network connectors: all off")
+    print("redaction_safe: yes (no credential values, prompt content, or full home paths)")
+    return 0
+
+
 # --------------------------------------------------------- providers on/off
 def _provider_rows(cfg) -> list:
     """Every known provider display-row with tier + current show/hide state.
@@ -136,7 +247,9 @@ def _provider_rows(cfg) -> list:
     (``USAGE_PROVIDER_NAMES``) and network connectors (``CONNECTOR_REGISTRY``,
     keyed by ``cls.name`` which can equal a usage-reader name — e.g. ``claude``
     has both a local ledger and a live-quota connector, so it is one row fed by
-    both). ``tier`` reflects the connector tier when present, else ``local``.
+    both). ``tier`` reflects the connector trust tier when present, else
+    ``local``. Local and network enablement remain separate in the payload so a
+    UI never implies that a local reader silently enabled a connector.
     """
     from .connectors import CONNECTOR_REGISTRY
     from .sources import USAGE_PROVIDER_NAMES
@@ -147,7 +260,9 @@ def _provider_rows(cfg) -> list:
     def row(name: str) -> dict:
         return rows.setdefault(name, {
             "name": name, "layers": [], "tier": "local",
-            "enabled": False, "hidden": name in hidden,
+            "enabled": False, "local_enabled": False,
+            "connector_enabled": False, "hosts": [],
+            "hidden": name in hidden,
         })
 
     usage_on = cfg.enabled("usage")
@@ -155,14 +270,17 @@ def _provider_rows(cfg) -> list:
         r = row(n)
         r["layers"].append("usage")
         if usage_on:
-            r["enabled"] = True
+            r["local_enabled"] = True
     for key, cls in CONNECTOR_REGISTRY.items():
         name = getattr(cls, "name", key)
         r = row(name)
         r["layers"].append("connector")
-        r["tier"] = getattr(cls, "tier", "gray")
+        r["tier"] = getattr(cls, "tier", "experimental")
+        r["hosts"] = list(getattr(cls, "hosts", ()) or ())
         if cfg.source(key).get("enabled"):
-            r["enabled"] = True
+            r["connector_enabled"] = True
+    for r in rows.values():
+        r["enabled"] = r["local_enabled"] or r["connector_enabled"]
     return list(rows.values())
 
 
@@ -240,17 +358,12 @@ def cmd_providers(args, ctx: Ctx):
     for r in rows:
         mark = "hidden" if r["hidden"] else "shown"
         layers = "+".join(r["layers"])
+        network = "net:on" if r["connector_enabled"] else "net:off"
         lines.append(
-            f"{r['name']:<11} {mark:<6} tier={r['tier']:<8} "
-            f"{'on' if r['enabled'] else 'off':<3} [{layers}]")
+            f"{r['name']:<11} {mark:<6} tier={r['tier']:<12} "
+            f"{'on' if r['enabled'] else 'off':<3} {network:<7} [{layers}]")
     _emit(lines or ["(no providers)"])
     return 0
-
-
-def _stub(phase: str, note: str):
-    def run(args, ctx: Ctx):
-        print(f"[{phase}] not yet implemented — {note}")
-    return run
 
 
 # ------------------------------------------------------------------- main
@@ -306,6 +419,11 @@ def main(argv=None) -> int:
     p = sub.add_parser("config", help="show resolved config + active sources")
     p.set_defaults(fn=cmd_config)
 
+    p = sub.add_parser("doctor",
+                       help="redaction-safe install and connector trust audit")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_doctor)
+
     p = sub.add_parser("providers",
                        help="list AI providers; show/hide them in the meter")
     p.add_argument("action", nargs="?", choices=["list", "show", "hide"],
@@ -315,14 +433,6 @@ def main(argv=None) -> int:
                    help="provider display-name for show/hide (e.g. gemini, cursor)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_providers)
-
-    for name, note in (
-        ("registry", "cross-agent registry view (Phase 2)"),
-        ("drift", "instruction/config drift detection (Phase 3)"),
-        ("guard", "risk-gate advisories (Phase 4)"),
-    ):
-        p = sub.add_parser(name, help=note)
-        p.set_defaults(fn=_stub(name, note))
 
     args = ap.parse_args(argv)
     if not getattr(args, "fn", None):

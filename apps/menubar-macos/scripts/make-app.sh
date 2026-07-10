@@ -12,8 +12,10 @@ set -euo pipefail
 
 HERE="${0:A:h}"
 ROOT="${HERE:h}"                 # apps/menubar-macos
+REPO_ROOT="${ROOT:h:h}"
 APP="SHawnBrain"
-VERSION="0.1.0"                  # CFBundleShortVersionString — clean x.y.z (Apple spec)
+VERSION="$(awk -F '"' '/^__version__ = / {print $2; exit}' "$REPO_ROOT/src/shbr/__init__.py")"
+[[ -n "$VERSION" ]] || { echo "!! could not resolve shbr version"; exit 1; }
 
 # ── channel: dev (personal daily driver) vs release (public build) ───────────
 CHANNEL="${SHBR_CHANNEL:-dev}"

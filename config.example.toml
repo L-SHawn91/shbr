@@ -66,22 +66,36 @@ enabled = true
 # Connectors call provider usage/quota APIs and are OFF by default. Enable only
 # the providers you want to query. Each connector reuses credentials that the
 # provider's own CLI/app already stored locally; shbr does not prompt for or save
-# new secrets. Failed auth/network reads are omitted from output.
+# new secrets. Failed auth/network reads are omitted from output. Run
+# `shbr doctor` after editing to see the enabled trust tier and remote hosts.
+#
+# experimental = internal/undocumented provider endpoint; may break without notice
+# documented   = publicly documented provider API
 
-# [sources.claude_quota]
+# experimental — api.anthropic.com
+# [sources.claude]
 # enabled = true
 
-# [sources.codex_quota]
+# experimental — chatgpt.com, auth.openai.com
+# [sources.codex]
 # enabled = true
 
-# [sources.gemini_quota]
+# experimental — cloudcode-pa.googleapis.com, oauth2.googleapis.com
+# [sources.gemini]
 # enabled = true
 
+# experimental — same Google Code Assist hosts as Gemini
+# [sources.antigravity]
+# enabled = true
+
+# experimental — cursor.com
 # [sources.cursor_quota]
 # enabled = true
 
-# [sources.copilot_quota]
+# experimental — api.github.com (via `gh api`)
+# [sources.copilot]
 # enabled = true
 
+# documented — openrouter.ai
 # [sources.openrouter]
 # enabled = true

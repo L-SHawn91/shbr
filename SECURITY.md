@@ -27,7 +27,12 @@ own CLI or app already placed on the machine, but they must:
 - fail silent on auth/network errors;
 - avoid writing refreshed credentials back to disk;
 - return metadata only;
-- clearly label undocumented or reverse-engineered endpoints as `gray`.
+- clearly label undocumented, internal, or reverse-engineered endpoints as
+  `experimental` and declare every remote hostname.
+
+Connector quota reads and OAuth refreshes may use GET or POST. They must not
+change provider account content or persist refreshed credentials. Run
+`shbr doctor` for a redaction-safe view of enabled connectors and hosts.
 
 ## Disclosure
 

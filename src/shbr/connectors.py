@@ -1266,6 +1266,170 @@ class OpenrouterConnector(Connector):
                 "quotas": [q]}
 
 
+class OllamaCloudConnector(Connector):
+    """Ollama Cloud remaining-quota reader — the session/weekly usage % the
+    ``ollama.com/settings`` page shows, which no local file or API endpoint
+    contains.
+
+    EXPERIMENTAL tier: Ollama Cloud's API (``/v1/*``, ``/api/*``) has no usage or
+    quota endpoint — confirmed by upstream issue #12532 and the ``UserResponse``
+    struct (``api/types.go``) which carries only ``plan``, not usage. The *only*
+    source of session/weekly usage % is the server-rendered HTML at
+    ``https://ollama.com/settings``, authenticated by the browser session cookie
+    ``__Secure-session`` (not the ``OLLAMA_API_KEY``). Every community tool
+    (ollama-usage, OllamaDash, aimo, llamaherd, Ollama_Orbit) uses this exact
+    method.
+
+    The user provides the cookie value via config (``[sources.ollama_cloud]
+    enabled = true, session_cookie = "..."``) or the ``OLLAMA_SESSION_COOKIE``
+    env var. The connector GETs the settings page with that cookie, parses the
+    ``[data-usage-meter]`` elements (session %, weekly %, resets-in text), and
+    returns them as quota dicts shaped like every other connector's output.
+
+    The plan name (free/pro/max) comes from ``/api/me`` using the same cookie —
+    that endpoint returns identity + plan but no quota, so it is enrichment
+    only. Fail-silent throughout: a missing/expired cookie returns ``None`` and
+    the row simply does not appear.
+    """
+
+    name = "ollama_cloud"
+    tier = "experimental"
+    hosts = ("ollama.com",)
+    # No cred_paths: the credential is a user-supplied cookie string, not a file.
+    cred_paths = ()
+
+    SETTINGS_URL = "https://ollama.com/settings"
+    ME_URL = "https://ollama.com/api/me"
+    _ENV_COOKIE = "OLLAMA_SESSION_COOKIE"
+
+    @classmethod
+    def available(cls, cfg: dict) -> bool:
+        """Enabled AND a session cookie is configured (config or env var)."""
+        if not cfg.get("enabled"):
+            return False
+        return bool(cfg.get("session_cookie")
+                    or os.environ.get(cls._ENV_COOKIE))
+
+    def _cookie(self) -> str | None:
+        """The session cookie value from config or env var."""
+        c = self.cfg.get("session_cookie")
+        if c:
+            return c
+        return os.environ.get(self._ENV_COOKIE)
+
+    @staticmethod
+    def _get_html(url: str, cookie: str, timeout: float = HTTP_TIMEOUT):
+        """GET a URL with a session cookie, return the response body or None."""
+        headers = {
+            "Cookie": f"__Secure-session={cookie}",
+            "Accept": "text/html,application/xhtml+xml",
+            "User-Agent": "shbr-connector",
+        }
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return None
+                return resp.read().decode("utf-8", errors="replace")
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _get_json_cookie(url: str, cookie: str, timeout: float = HTTP_TIMEOUT):
+        """GET a JSON endpoint with a session cookie, return parsed dict or None."""
+        headers = {
+            "Cookie": f"__Secure-session={cookie}",
+            "Accept": "application/json",
+            "User-Agent": "shbr-connector",
+        }
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return None
+                return json.loads(resp.read())
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_usage_meters(html: str) -> list:
+        """Parse session/weekly usage % from the settings page HTML.
+
+        Uses ``[data-usage-meter]`` elements (the most stable selector, per
+        OllamaDash) and falls back to text pattern matching for
+        ``Session usage`` / ``Weekly usage`` labels with percentage values.
+        Returns a list of quota dicts.
+        """
+        if not html:
+            return []
+        out = []
+
+        # Primary: parse [data-usage-meter] data attributes.
+        # Each meter has data-percent (used %) and a data-window attribute.
+        for m in re.finditer(
+            r'data-usage-meter[^>]*\bdata-percent="([\d.]+)"'
+            r'(?:[^>]*\bdata-window="([^"]*)")?'
+            r'(?:[^>]*\bdata-reset="([^"]*)")?',
+            html,
+        ):
+            used = float(m.group(1))
+            window = m.group(2) or ""
+            reset = m.group(3) or ""
+            q = {
+                "id": window or "usage",
+                "window": window or "?",
+                "usedPercent": round(used, 1),
+                "remainingPercent": round(100 - used, 1),
+                "resets_at": reset or None,
+            }
+            out.append(q)
+
+        if out:
+            return out
+
+        # Fallback: text pattern matching (session / weekly labels).
+        for label, qid, window in (("Session usage", "session", "5h"),
+                                   ("Weekly usage", "weekly", "7d")):
+            idx = html.find(label)
+            if idx < 0:
+                continue
+            # Grab the nearest percentage after the label.
+            tail = html[idx:idx + 400]
+            pm = re.search(r"(\d+(?:\.\d+)?)\s*%", tail)
+            if not pm:
+                continue
+            used = float(pm.group(1))
+            # Look for a "Resets in ..." nearby.
+            rm = re.search(
+                r"Resets?\s+in\s+([^<\"]{3,60})", tail, re.IGNORECASE)
+            out.append({
+                "id": qid,
+                "window": window,
+                "usedPercent": round(used, 1),
+                "remainingPercent": round(100 - used, 1),
+                "resets_at": rm.group(1).strip() if rm else None,
+            })
+        return out
+
+    def fetch(self):
+        cookie = self._cookie()
+        if not cookie:
+            return None
+        html = self._get_html(self.SETTINGS_URL, cookie)
+        if not html:
+            return None
+        quotas = self._parse_usage_meters(html)
+        if not quotas:
+            return None
+        # Enrich with plan name from /api/me (best-effort, non-fatal).
+        me = self._get_json_cookie(self.ME_URL, cookie)
+        plan = None
+        if isinstance(me, dict):
+            plan = me.get("plan")
+        return {"name": self.name, "status": "live", "tier": self.tier,
+                "plan": plan, "quotas": quotas}
+
+
 # Per-provider connectors are registered here as recon confirms an endpoint and
 # credential path for each. Empty until a concrete connector is verified — an
 # unverified provider ships no code rather than a speculative stub.
@@ -1289,6 +1453,11 @@ CONNECTOR_REGISTRY: dict = {
     # the gateway credit/spend a local disk read cannot see. Distinct key from
     # the on-by-default local ``opencode`` token-ledger source.
     "openrouter": OpenrouterConnector,
+    # OFF by default; opt-in via ``[sources.ollama_cloud] enabled = true,
+    # session_cookie = "..."`` (or OLLAMA_SESSION_COOKIE env var). EXPERIMENTAL
+    # tier — scrapes ollama.com/settings HTML with the browser session cookie
+    # because Ollama Cloud's API has no usage endpoint (upstream issue #12532).
+    "ollama_cloud": OllamaCloudConnector,
 }
 
 

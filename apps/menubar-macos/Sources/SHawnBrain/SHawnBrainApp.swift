@@ -56,5 +56,23 @@ struct SHawnBrainApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
+        guardOffDuplicateInstances()
+    }
+
+    /// 두 개 이상의 SHawnBrain 프로세스가 동시에 떠서 UserDefaults/메뉴바
+    /// 슬롯 경합으로 hang이 나는 것을 막는다. 같은 번들 ID를 가진 다른
+    /// running 인스턴스가 있으면 이(새) 프로세스가 종료된다.
+    private func guardOffDuplicateInstances() {
+        let ourBundleID = Bundle.main.bundleIdentifier ?? ""
+        guard !ourBundleID.isEmpty else { return }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let others = NSWorkspace.shared.runningApplications
+            .filter { $0.bundleIdentifier == ourBundleID && $0.processIdentifier != ownPID }
+        if !others.isEmpty {
+            // 이미 실행 중인 인스턴스가 있으므로 이 인스턴스는 종료한다.
+            // 먼저 기존 인스턴스를 앞으로 끌어올려 사용자가 혼동하지 않게 한다.
+            for app in others { app.activate() }
+            NSApp.terminate(nil)
+        }
     }
 }

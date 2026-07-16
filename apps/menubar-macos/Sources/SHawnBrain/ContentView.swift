@@ -486,6 +486,11 @@ struct ContentView: View {
                     Circle().fill(live ? Color.green : Color.secondary.opacity(0.4))
                         .frame(width: 7, height: 7)
                     Text(name.capitalized).font(.subheadline.weight(.medium))
+                    if let plan = p.plan, !plan.isEmpty {
+                        Text(plan.uppercased()).font(.caption2).foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                    }
                     if !live, let s = p.status {
                         Text(s).font(.caption2).foregroundStyle(.secondary)
                             .padding(.horizontal, 5).padding(.vertical, 1)

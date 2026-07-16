@@ -127,6 +127,7 @@ struct AgentMeter: Decodable {
         var month: Double?
         var all: Double?
         var quotas: [Quota]?
+        var plan: String?
     }
 
     struct Quota: Decodable, Identifiable {

@@ -99,3 +99,11 @@ enabled = true
 # documented — openrouter.ai
 # [sources.openrouter]
 # enabled = true
+
+# experimental — ollama.com (scrapes /settings HTML with browser session cookie)
+# Ollama Cloud's API has no usage endpoint (github.com/ollama/ollama#12532).
+# Provide the __Secure-session cookie value from a logged-in browser, or set
+# the OLLAMA_SESSION_COOKIE env var. The cookie lasts weeks to months.
+# [sources.ollama_cloud]
+# enabled = true
+# session_cookie = ""

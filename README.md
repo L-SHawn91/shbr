@@ -133,6 +133,7 @@ Live quota connectors are separate and opt-in:
 | Cursor | `experimental` | `cursor.com` |
 | GitHub Copilot | `experimental` | `api.github.com` |
 | OpenRouter | `documented` | `openrouter.ai` |
+| Ollama Cloud | `experimental` | `ollama.com` |
 
 `documented` means the connector uses a publicly documented provider API.
 `experimental` means it relies on an internal, undocumented, or

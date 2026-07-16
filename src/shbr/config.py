@@ -23,8 +23,11 @@ CLAUDE_MEMORY_GLOB = "~/.claude/projects/*/memory/*.md"
 # Generic, ships-to-anyone defaults. No vendor-private runtime paths here.
 DEFAULTS = {
     "sources": {
-        "agentcat": {"enabled": True},  # gated on the `agentcat` binary existing
+        "usage": {"enabled": True},  # native local token reader (codex/claude on-disk state)
         "claude_memory": {"enabled": True, "glob": CLAUDE_MEMORY_GLOB},
+        "claude_sessions": {"enabled": True},  # Claude Code transcripts → per-session rows (available() gates)
+        "cursor": {"enabled": True},  # Cursor IDE composer sessions (available() gates when not installed)
+        "system": {"enabled": True},  # host CPU / memory / temperature observer
     },
 }
 
@@ -40,12 +43,26 @@ class Config:
         mf = data.get("migrate_from")
         self.migrate_from = _expand(mf) if mf else None
         self.sources: dict = data.get("sources", {})
+        # Display-layer filter, orthogonal to per-source ``enabled`` (which is the
+        # opt-in/credential gate). ``[providers] hidden = [...]`` lists provider
+        # display-names the user chose to hide from the meter/menu-bar output.
+        self.providers: dict = data.get("providers", {}) or {}
 
     def source(self, name: str) -> dict:
         return self.sources.get(name, {}) or {}
 
     def enabled(self, name: str) -> bool:
         return bool(self.source(name).get("enabled"))
+
+    def hidden_set(self) -> set:
+        """Provider display-names the user hid via ``[providers] hidden``."""
+        h = self.providers.get("hidden", [])
+        if isinstance(h, (list, tuple)):
+            return {str(x) for x in h}
+        return set()
+
+    def hidden(self, name: str) -> bool:
+        return name in self.hidden_set()
 
 
 def _merge(base: dict, over: dict) -> dict:

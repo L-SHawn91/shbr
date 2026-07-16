@@ -1,0 +1,28 @@
+name: Connector request
+description: Propose a metadata-only provider quota connector.
+title: "[connector] "
+labels: [connector]
+body:
+  - type: input
+    id: provider
+    attributes:
+      label: Provider or runtime
+    validations:
+      required: true
+  - type: textarea
+    id: local
+    attributes:
+      label: Local metadata source
+      description: Describe public file/API documentation without pasting credentials or private payloads.
+  - type: textarea
+    id: api
+    attributes:
+      label: Public API documentation
+      description: Link official documentation. Undocumented endpoints will be classified experimental.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      options:
+        - label: I did not include credentials, cookies, prompts, or transcripts.
+          required: true

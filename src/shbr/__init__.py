@@ -6,8 +6,9 @@ quota usage, persistent-memory operations, and sessions — and never intervenes
 Design contract for this package:
   * The core carries NO deployment-specific paths. Everything private lives in
     config + pluggable source adapters (see ``config.example.toml``).
-  * Default config auto-discovers only generic, public sources (AgentCat if it
-    is installed, Claude Code memory files). Vendor-specific runtimes are opt-in.
+  * Default config auto-discovers only generic, public sources (on-disk token
+    counters for local agents, Claude Code memory files). Vendor-specific
+    runtimes are opt-in.
   * Output is metadata only — never prompt or memory content.
 """
 

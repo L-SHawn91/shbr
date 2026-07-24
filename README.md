@@ -1,11 +1,36 @@
-# shbr — SHawn Brain
+# AI Usage Indicator
 
-**A local activity cockpit for the CLI AI agents already running on your machine.**
+**A local multi-account usage monitor for AI providers and agents.**
 
-`shbr` is a thin observer. It does not run your agents, proxy your traffic, or
+`ai-usage-indicator` is a thin observer. It does not run your agents, proxy your traffic, or
 touch a live database. It reads what your agents already write to disk — usage
 snapshots, persistent-memory files, session records — and gives you one place to
 see token/quota burn, memory-write activity, and recent sessions across tools.
+
+The legacy `shbr` command and Python module remain compatibility aliases. Existing
+`~/.config/shbr`, `~/.local/state/shbr`, and `$SHBR_CONFIG` paths are preserved so
+the rename does not discard user state.
+
+### Migrating an existing pipx install
+
+The distribution name changed from `shbr` to `ai-usage-indicator`. A clean pipx
+replacement avoids stale package metadata while preserving config and state:
+
+```bash
+pipx uninstall shbr
+pipx install https://github.com/L-SHawn91/shbr/releases/download/v0.1.0/ai_usage_indicator-0.1.0-py3-none-any.whl
+ai-usage-indicator --version
+shbr --version                 # compatibility alias, same version
+```
+
+Neither command removes `~/.config/shbr` or `~/.local/state/shbr`. New installs
+also accept `$AI_USAGE_INDICATOR_CONFIG` and
+`~/.config/ai-usage-indicator/config.toml`; canonical paths take precedence, and
+legacy paths remain the state-compatible fallback.
+
+Connector cache keys are now account-scoped. Legacy provider-only cache entries
+are intentionally not reused; the first enabled connector read after upgrading
+refreshes that account's quota cache.
 
 - **Zero instrumentation.** No SDK to import, no wrapper to launch your agent
   through, no API keys handed over. If a tool already writes state locally,
@@ -21,9 +46,9 @@ see token/quota burn, memory-write activity, and recent sessions across tools.
 ## Public beta install
 
 ```bash
-pipx install git+https://github.com/L-SHawn91/shbr.git
-shbr doctor
-shbr snapshot --no-update
+pipx install https://github.com/L-SHawn91/shbr/releases/download/v0.1.0/ai_usage_indicator-0.1.0-py3-none-any.whl
+ai-usage-indicator doctor
+ai-usage-indicator snapshot --no-update
 ```
 
 For development, clone the repository and run `pip install -e .`. The core is
@@ -32,14 +57,14 @@ Python 3.11+ and has no runtime dependencies.
 ## Use
 
 ```bash
-shbr snapshot      # everything: usage + memory ops + recent sessions
-shbr meter         # token / quota usage per source
-shbr memory        # persistent-memory file operations since last scan
-shbr sessions      # recent + active sessions
-shbr history -n 30 # recent recorded events
-shbr config        # show resolved config + which sources are active
-shbr doctor        # redaction-safe install + connector trust audit
-shbr menubar       # SwiftBar/xbar plugin output (glance line + dropdown)
+ai-usage-indicator snapshot      # everything: usage + memory ops + recent sessions
+ai-usage-indicator meter         # token / quota usage per source
+ai-usage-indicator memory        # persistent-memory file operations since last scan
+ai-usage-indicator sessions      # recent + active sessions
+ai-usage-indicator history -n 30 # recent recorded events
+ai-usage-indicator config        # resolved config + active sources
+ai-usage-indicator doctor        # redaction-safe trust audit
+ai-usage-indicator menubar       # menu-bar text or --json contract
 ```
 
 Add `--json` to any command for machine-readable output.
@@ -49,7 +74,7 @@ Add `--json` to any command for machine-readable output.
 ```mermaid
 flowchart LR
   subgraph Local["Local machine — default path"]
-    L["Agent ledgers and session metadata"] --> C["shbr core"]
+    L["Agent ledgers and session metadata"] --> C["AI Usage Indicator core"]
     S["Host CPU / memory / temperature"] --> C
     C --> J["CLI / JSON"]
     J --> M["Native macOS menu bar"]
@@ -69,17 +94,18 @@ with the full meter, per-agent usage/quota, and recent sessions. `shbr` itself
 stays a headless, read-only CLI: it only *emits* the data; a separate frontend
 draws the menu bar.
 
-**SHawn Brain app (recommended).** A self-contained native menu-bar app — no
-third-party host. It shells out to `shbr menubar --json` and renders the panel
+**AI Usage Indicator app (recommended).** A native menu-bar frontend — no
+third-party host. The developer preview shells out to `ai-usage-indicator menubar --json` (falling
+back to `shbr` during the transition) and renders the panel
 itself.
 
 ```bash
 cd apps/menubar-macos
 swift build -c release
-.build/release/SHawnBrain          # menu-bar item appears; no dock icon
+.build/release/AIUsageIndicator    # menu-bar item appears; no dock icon
 ```
 
-Requires `shbr` on your `PATH`. See [`apps/menubar-macos/README.md`](apps/menubar-macos/README.md)
+Requires `ai-usage-indicator` or legacy `shbr` on your `PATH`. See [`apps/menubar-macos/README.md`](apps/menubar-macos/README.md)
 for the refresh-interval control and packaging notes.
 
 **SwiftBar plugin (dev scaffold).** `shbr menubar` (no `--json`) also prints
@@ -133,7 +159,7 @@ Live quota connectors are separate and opt-in:
 | Cursor | `experimental` | `cursor.com` |
 | GitHub Copilot | `experimental` | `api.github.com` |
 | OpenRouter | `documented` | `openrouter.ai` |
-| Ollama Cloud | `experimental` | `ollama.com` |
+| Browser-session pilot | `experimental` | loopback `127.0.0.1` only |
 
 `documented` means the connector uses a publicly documented provider API.
 `experimental` means it relies on an internal, undocumented, or
@@ -165,9 +191,30 @@ prompt content.
 This keeps the OSS core useful without forcing users to trust a proxy or hand
 over API keys.
 
+### Browser-session pilot boundary
+
+The optional `browser_pilot` connector does not read browser cookies, browser
+databases, DOM/HTML, local/session storage, or CDP. It accepts only bounded quota
+metadata from an account-specific profile through an authenticated
+`127.0.0.1` bridge. Redirects, proxies, unknown fields, non-finite values, and
+sensitive fields are rejected. The profile must be owned by the current user and
+mode `0700`; the local capability-token file must be owned by the current user
+and mode `0600`. Because TCP loopback ports can be claimed by another local
+process before the trusted helper starts, a port-squatting process could receive
+the local bridge capability and spoof quota-display metadata. The capability is
+not a provider credential, but users should start the reviewed helper first,
+keep its lifetime short, and treat unexpected quota output as untrusted.
+
+This release defines and tests the core-side contract only. It does **not** ship
+a provider-specific browser observer and does not perform an unattended login.
+Keep `browser_pilot` disabled until a separately reviewed helper implements this
+sanitized payload contract.
+
 ## Configuration
 
-`shbr` looks for config in this order: `--config <path>` → `$SHBR_CONFIG` →
+AI Usage Indicator looks for config in this order: `--config <path>` →
+`$AI_USAGE_INDICATOR_CONFIG` →
+`~/.config/ai-usage-indicator/config.toml` → `$SHBR_CONFIG` →
 `~/.config/shbr/config.toml` → built-in defaults. Your config is merged *over*
 the defaults per source, so you only declare what you want to add or change.
 

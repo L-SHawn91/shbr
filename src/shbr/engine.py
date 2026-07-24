@@ -10,6 +10,7 @@ import glob
 import os
 
 from . import APP_NAME
+from .model import connector_metric_source, local_metric_source
 from .util import age, fmt_bytes, fmt_tok, now
 
 # ------------------------------------------------------------------ meter
@@ -43,93 +44,144 @@ def _hide_providers(meters: list, hidden) -> list:
 
 
 def _fetch_connector_results(connectors, cache=None, hidden=()) -> list:
-    """Run every opt-in connector's network fetch and return the ordered result
-    list. No ``meters`` needed — so this can run concurrently with
-    ``build_meter`` (see ``build_snapshot``). The three phases (cache-hit
-    resolution → parallel fetch → cache put / stale fallback) and their ordering
-    guarantees are documented on ``apply_connectors``.
-    """
+    """Fetch connector results in parallel with account-scoped caching."""
     hidden = set(hidden or ())
     if not connectors:
         return []
 
-    # Phase 1 (sequential, no network): resolve the hidden filter and cache hits,
-    # and collect the connectors that still need a live fetch. Each connector
-    # keeps an ordered slot so the merged result order is identical to the old
-    # sequential loop.  slot = ["hit", result] | ["fetch", None, name]
+    def _with_identity(connector, result):
+        if not isinstance(result, dict):
+            return result
+        enriched = dict(result)
+        enriched.setdefault("account_id", getattr(connector, "account_id", "default"))
+        enriched.setdefault(
+            "account_label",
+            getattr(connector, "account_label", enriched["account_id"]),
+        )
+        enriched.setdefault("source_id", getattr(connector, "source_id", "provider-api"))
+        enriched.setdefault(
+            "source_kind", getattr(connector, "source_kind", "provider-api")
+        )
+        enriched.setdefault("tier", getattr(connector, "tier", "experimental"))
+        return enriched
+
     slots: list = []
     to_fetch: list = []
-    for c in connectors:
-        name = getattr(c, "name", None)
+    for connector in connectors:
+        name = getattr(connector, "name", None)
+        cache_key = getattr(connector, "cache_key", name)
         if name and name in hidden:
-            continue  # user hid this provider — do not touch the network.
-        if cache is not None and name:
-            hit = cache.fresh(name)
+            continue
+        if cache is not None and cache_key:
+            hit = cache.fresh(cache_key)
             if hit is not None:
-                slots.append(["hit", hit])
+                slots.append(["hit", _with_identity(connector, hit)])
                 continue
-        slots.append(["fetch", None, name])  # r filled in after the parallel fetch
-        to_fetch.append((len(slots) - 1, c))
+        slots.append(["fetch", None, cache_key, connector])
+        to_fetch.append((len(slots) - 1, connector))
 
-    # Phase 2 (parallel): every connector needing the network fetches at once, so
-    # wall time collapses from sum-of-all connectors to the slowest single one —
-    # keeps the on-demand panel-open poll snappy. Fail-silent per connector: an
-    # exception (or timeout) becomes None and falls back to cache in phase 3.
     if to_fetch:
-        def _fetch(c):
+        def _fetch(connector):
             try:
-                return c.fetch()
+                return _with_identity(connector, connector.fetch())
             except Exception:
                 return None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(to_fetch), 8)) as ex:
-            fetched = list(ex.map(lambda item: _fetch(item[1]), to_fetch))
-        for (idx, _c), r in zip(to_fetch, fetched):
-            slots[idx][1] = r
 
-    # Phase 3 (sequential, in original order): apply cache put / stale fallback.
-    # Cache writes stay single-threaded here so the parallel fetch never races on
-    # the cache.
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(to_fetch), 8)
+        ) as executor:
+            fetched = list(executor.map(lambda item: _fetch(item[1]), to_fetch))
+        for (index, _connector), result in zip(to_fetch, fetched):
+            slots[index][1] = result
+
     results = []
     for slot in slots:
         if slot[0] == "hit":
             results.append(slot[1])
             continue
-        _, r, name = slot
-        if r and r.get("name"):
-            if cache is not None and name:
-                cache.put(name, r)
-            results.append(r)
-        elif cache is not None and name:
-            stale = cache.stale(name)
+        _, result, cache_key, connector = slot
+        if result and result.get("name"):
+            if cache is not None and cache_key:
+                cache.put(cache_key, result)
+            results.append(result)
+        elif cache is not None and cache_key:
+            stale = cache.stale(cache_key)
             if stale:
-                results.append(stale)
+                results.append(_with_identity(connector, stale))
     return results
 
 
-def _merge_connector_results(meters: list, results: list, hidden=()) -> list:
-    """Merge fetched connector results into the providers meter, in place.
+def _ensure_local_account(provider: dict) -> None:
+    """Expose legacy local token windows through the canonical account model."""
+    source = local_metric_source(provider)
+    accounts = provider.setdefault("accounts", [])
+    if source is None:
+        return
+    account = next(
+        (row for row in accounts if row.get("id") == "unattributed-local"),
+        None,
+    )
+    if account is None:
+        account = {
+            "id": "unattributed-local",
+            "label": "Unattributed local usage",
+            "metric_sources": [],
+        }
+        accounts.append(account)
+    metric_sources = account.setdefault("metric_sources", [])
+    if not any(row.get("id") == source.id for row in metric_sources):
+        metric_sources.append(source.to_dict())
 
-    The pure-CPU tail of ``apply_connectors``: no network, no ``cache`` — it only
-    folds the already-fetched ``results`` (from ``_fetch_connector_results``) into
-    ``providers[name]["quotas"]`` and drops hidden rows. Split out so the fetch can
-    overlap ``build_meter`` and only this cheap merge needs ``meters``.
-    """
+
+def _merge_account_source(provider: dict, result: dict) -> None:
+    """Add one connector result under its provider/account/source identity."""
+    account_id = str(result.get("account_id") or "default")
+    account_label = str(result.get("account_label") or account_id)
+    accounts = provider.setdefault("accounts", [])
+    account = next((row for row in accounts if row.get("id") == account_id), None)
+    if account is None:
+        account = {"id": account_id, "label": account_label, "metric_sources": []}
+        accounts.append(account)
+    source = connector_metric_source(result).to_dict()
+    metric_sources = account.setdefault("metric_sources", [])
+    existing = next((row for row in metric_sources if row.get("id") == source["id"]), None)
+    if existing is None:
+        metric_sources.append(source)
+        return
+    by_id = {metric.get("id"): metric for metric in existing.setdefault("metrics", [])}
+    for metric in source.get("metrics", []):
+        by_id[metric.get("id")] = metric
+    existing.update({key: value for key, value in source.items() if key != "metrics"})
+    existing["metrics"] = list(by_id.values())
+
+
+def _merge_connector_results(meters: list, results: list, hidden=()) -> list:
+    """Merge connector results while preserving the legacy provider payload."""
     hidden = set(hidden or ())
-    if not results:
-        return _hide_providers(meters, hidden)
     provm = next((m for m in meters if m.get("kind") == "providers"), None)
+    if not results:
+        if provm is not None:
+            for provider in (provm.get("providers") or {}).values():
+                _ensure_local_account(provider)
+        return _hide_providers(meters, hidden)
     if provm is None:
         provm = {"kind": "providers", "source": "connectors",
                  "providers": {}, "memory_bytes": {}, "process_count": None}
         meters.append(provm)
     provs = provm.setdefault("providers", {})
-    for r in results:
-        p = provs.setdefault(r["name"], {"status": None, "today": None,
-                                         "week": None, "month": None,
-                                         "all": None, "quotas": []})
-        p.setdefault("quotas", []).extend(r.get("quotas") or [])
-        if r.get("status") and not p.get("status"):
-            p["status"] = r["status"]
+    for provider in provs.values():
+        _ensure_local_account(provider)
+    for result in results:
+        provider = provs.setdefault(
+            result["name"],
+            {"status": None, "today": None, "week": None, "month": None,
+             "all": None, "quotas": []},
+        )
+        _ensure_local_account(provider)
+        provider.setdefault("quotas", []).extend(result.get("quotas") or [])
+        _merge_account_source(provider, result)
+        if result.get("status") and not provider.get("status"):
+            provider["status"] = result["status"]
     return _hide_providers(meters, hidden)
 
 
@@ -160,7 +212,7 @@ def apply_connectors(meters: list, connectors, cache=None, hidden=()) -> list:
     """
     hidden = set(hidden or ())
     if not connectors:
-        return _hide_providers(meters, hidden)
+        return _merge_connector_results(meters, [], hidden)
     results = _fetch_connector_results(connectors, cache, hidden)
     return _merge_connector_results(meters, results, hidden)
 

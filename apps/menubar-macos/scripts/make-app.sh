@@ -1,9 +1,10 @@
 #!/bin/zsh
-# Package the release binary into a proper double-clickable SHawnBrain.app bundle.
-# Phase A: the bundle still shells out to `shbr` on PATH (installed separately).
+# Package the release binary into a proper double-clickable AIUsageIndicator.app bundle.
+# Phase A: the bundle still shells out to `ai-usage-indicator` (or legacy `shbr`)
+# on PATH, installed separately.
 #
 # Channel (SHBR_CHANNEL): "dev" (default) = the version you run daily, ad-hoc
-# signed, bundle id ….dev + name "SHawn Brain (dev)" so it coexists in the menu
+# signed, bundle id ….dev + name "AI Usage Indicator (dev)" so it coexists in the menu
 # bar with the shipped build. "release" = the public build (clean id + name);
 # release.sh drives that path with Developer ID signing + notarization.
 #
@@ -13,21 +14,21 @@ set -euo pipefail
 HERE="${0:A:h}"
 ROOT="${HERE:h}"                 # apps/menubar-macos
 REPO_ROOT="${ROOT:h:h}"
-APP="SHawnBrain"
+APP="AIUsageIndicator"
 VERSION="$(awk -F '"' '/^__version__ = / {print $2; exit}' "$REPO_ROOT/src/shbr/__init__.py")"
 [[ -n "$VERSION" ]] || { echo "!! could not resolve shbr version"; exit 1; }
 
 # ── channel: dev (personal daily driver) vs release (public build) ───────────
 CHANNEL="${SHBR_CHANNEL:-dev}"
-BASE_BUNDLE_ID="com.shawn.shawnbrain"
+BASE_BUNDLE_ID="com.shawn.aiusageindicator"
 BUILD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [[ "$CHANNEL" == "release" ]]; then
   BUNDLE_ID="$BASE_BUNDLE_ID"
-  DISPLAY_NAME="SHawn Brain"
+  DISPLAY_NAME="AI Usage Indicator"
 else
   CHANNEL="dev"
   BUNDLE_ID="$BASE_BUNDLE_ID.dev"
-  DISPLAY_NAME="SHawn Brain (dev)"
+  DISPLAY_NAME="AI Usage Indicator (dev)"
 fi
 echo "› channel: $CHANNEL  ($BUNDLE_ID)"
 
@@ -71,7 +72,7 @@ cat > "$APPDIR/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key>             <true/>
 $ICON_PLIST
   <key>NSHighResolutionCapable</key> <true/>
-  <key>NSHumanReadableCopyright</key><string>SHawn Brain — read-only agent observer</string>
+  <key>NSHumanReadableCopyright</key><string>AI Usage Indicator — local read-only agent observer</string>
 </dict>
 </plist>
 PLIST

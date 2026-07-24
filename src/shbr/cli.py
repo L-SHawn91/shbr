@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import APP_NAME, __version__
+from . import APP_NAME, CLI_NAME, __version__
 from . import config, engine
 from .cache import ConnectorCache
 from .connectors import build_connectors
@@ -335,7 +335,7 @@ def cmd_providers(args, ctx: Ctx):
     if action in ("show", "hide"):
         name = getattr(args, "name", None)
         if not name:
-            print(f"usage: shbr providers {action} <name>")
+            print(f"usage: {CLI_NAME} providers {action} <name>")
             return 2
         if name not in known:
             print(f"unknown provider: {name}")
@@ -369,12 +369,16 @@ def cmd_providers(args, ctx: Ctx):
 # ------------------------------------------------------------------- main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        prog="shbr",
+        prog=CLI_NAME,
         description=f"{APP_NAME} — read-only observability for CLI AI agents",
     )
     ap.add_argument("--version", action="version",
                     version=f"{APP_NAME} {__version__}")
-    ap.add_argument("--config", help="path to a config.toml (overrides $SHBR_CONFIG)")
+    ap.add_argument(
+        "--config",
+        help=("path to a config.toml (overrides $AI_USAGE_INDICATOR_CONFIG "
+              "and legacy $SHBR_CONFIG)"),
+    )
     sub = ap.add_subparsers(dest="cmd")
 
     p = sub.add_parser("snapshot", help="full read-only snapshot")
@@ -395,7 +399,7 @@ def main(argv=None) -> int:
                                        "--json for a native menu-bar app")
     p.add_argument("--json", action="store_true",
                    help="structured payload (glance + meters + sessions) for the "
-                        "native SHawn Brain menu-bar app to render")
+                        "native AI Usage Indicator menu-bar app to render")
     p.add_argument("--no-agents", action="store_true",
                    help="system resources only — skip agent usage sources (fast, "
                         "safe for a tight refresh interval)")

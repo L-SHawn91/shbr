@@ -20,6 +20,12 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Compile
         run: python -m compileall -q src/shbr tests
+      - name: Install test runner
+        run: python -m pip install pytest
+      - name: Full test suite
+        env:
+          PYTHONPATH: src
+        run: python -m pytest -q
       - name: Unit and privacy contract tests
         env:
           PYTHONPATH: src
@@ -47,4 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build native menu-bar app
         working-directory: apps/menubar-macos
-        run: swift build -c release
+        run: |
+          zsh -n scripts/make-app.sh scripts/release.sh
+          swift build -c release
+          test -x "$(swift build -c release --show-bin-path)/AIUsageIndicator"

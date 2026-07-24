@@ -1,55 +1,60 @@
-# SHawn Brain — macOS menu-bar app
+# AI Usage Indicator — macOS menu-bar app
 
-The native menu-bar frontend for [`shbr`](../../README.md). A self-contained,
-menu-bar-resident SwiftUI app — **no SwiftBar, no host app**. It draws its own
-menu-bar item via `MenuBarExtra` and renders the read-only `shbr` core.
+The native menu-bar frontend for [AI Usage Indicator](../../README.md). It is a
+SwiftUI app—no SwiftBar host required—and renders the separately installed local core's
+JSON contract.
 
-- Menu-bar line: the always-on glance — `🧠 15% · 41° · 54%` (CPU · temp · RAM),
-  with a 🟡/🔴 marker when the host crosses warn/crit thresholds.
-- Dropdown panel: host resources (CPU / memory / temp with bars), per-provider
-  agent usage + remaining-quota %, and the recent/active session list.
-- Refresh interval picker (2s / 5s / 10s / 30s), persisted across launches.
+- Menu-bar line: `🧠 15% · 41° · 54%` (CPU · temperature · RAM), with a warning
+  marker when configured thresholds are crossed.
+- Panel: host resources, per-provider/account usage and quota windows, and recent
+  local AI-tool sessions.
+- Refresh: on demand when the panel opens, with a loose three-hour backup timer.
 
-Read-only, top to bottom: every value comes straight from `shbr menubar --json`.
-The app never writes or mutates anything.
+Observed agent/provider source data is read-only. The app can write only its own
+preferences and login-item setting; the Python core can write its own cache,
+event log, and diff baseline under the configured state directory.
 
-## Build & run
+## Build and run
 
 ```bash
 swift build -c release
-.build/release/SHawnBrain
+.build/release/AIUsageIndicator
 ```
 
-A menu-bar item appears; there is no dock icon (the app runs as an
-`.accessory`). Quit from the panel's **Quit** button.
+A menu-bar item appears; there is no dock icon. Quit from the panel.
 
-Requires `shbr` on your `PATH` (the app runs `shbr menubar --json` via a login
-shell). Verify with `shbr menubar --json` first; if that errors, the panel shows
-the message instead of data.
+Install the canonical CLI first and verify its JSON payload:
+
+```bash
+ai-usage-indicator menubar --json
+```
+
+During the transition, the app also accepts the legacy `shbr` executable. It
+prefers `ai-usage-indicator` when both are present.
 
 ## Architecture
 
-This is the **product frontend** — a separate Swift package that consumes the
-JSON contract. The Python `shbr` core stays a headless, stdlib-only, read-only
-engine; this app is a thin renderer on top of it.
+This Swift package is a renderer. The Python core remains headless and
+stdlib-only.
 
-- **Phase A (now):** shells out to an installed `shbr menubar --json`.
-- **Phase B (distribution):** bundle a frozen `shbr` binary so the `.app` is a
-  single download with no Python/`shbr` prerequisite.
+- **Developer preview:** shells out to `ai-usage-indicator menubar --json`, with
+  `shbr` as a compatibility fallback.
+- **Distribution milestone:** bundle a frozen core so the `.app` no longer
+  requires Python or a separate CLI install.
 
 | file | role |
 |------|------|
-| `Sources/SHawnBrain/Snapshot.swift`     | Codable mirror of `shbr menubar --json` (the contract) |
-| `Sources/SHawnBrain/BrainModel.swift`   | runs `shbr`, decodes, refreshes on a timer; formatting helpers |
-| `Sources/SHawnBrain/SHawnBrainApp.swift`| `@main` `MenuBarExtra` scene + accessory activation policy |
-| `Sources/SHawnBrain/BrainFrames.swift`  | G1 Route A menubar frames (idle + peak glow × intensity, base64) |
-| `Sources/SHawnBrain/ContentView.swift`  | the dropdown panel |
+| `Sources/SHawnBrain/Snapshot.swift` | Codable mirror of the menu-bar JSON contract |
+| `Sources/SHawnBrain/BrainModel.swift` | resolves/runs the CLI, decodes data, controls refresh |
+| `Sources/SHawnBrain/SHawnBrainApp.swift` | `@main` menu-bar and accessory-window scenes |
+| `Sources/SHawnBrain/BrainFrames.swift` | menu-bar animation frames |
+| `Sources/SHawnBrain/ContentView.swift` | panel and settings UI |
 
-Regenerate menubar frames after SHawn-slide lock PNG changes:
+Regenerate menu-bar frames after source artwork changes:
 
 ```bash
 python3 scripts/render_brain_frames.py --write-swift
 ```
 
-The Codable models and `engine.menubar_data()` are two ends of one contract —
-change one, change the other.
+`Snapshot.swift` and `shbr.engine.menubar_data()` are the two ends of one public
+contract; schema changes must keep both in sync.

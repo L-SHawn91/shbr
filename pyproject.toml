@@ -1,11 +1,11 @@
 [project]
-name = "shbr"
+name = "ai-usage-indicator"
 dynamic = ["version"]
-description = "Local activity cockpit for CLI AI agents"
+description = "Local multi-account usage monitor for AI providers and agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
-authors = [{ name = "SHawn Brain" }]
+authors = [{ name = "SHawn" }]
 keywords = ["observability", "ai-agents", "cli", "tokens", "memory", "local-first"]
 dependencies = []
 classifiers = [
@@ -27,6 +27,7 @@ Homepage = "https://github.com/L-SHawn91/shbr"
 Issues = "https://github.com/L-SHawn91/shbr/issues"
 
 [project.scripts]
+ai-usage-indicator = "shbr.cli:main"
 shbr = "shbr.cli:main"
 
 [build-system]

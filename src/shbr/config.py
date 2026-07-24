@@ -2,9 +2,11 @@
 
 Resolution order:
   1. explicit path passed to ``load()``
-  2. ``$SHBR_CONFIG``
-  3. ``~/.config/shbr/config.toml``
-  4. built-in defaults (generic, public sources only)
+  2. ``$AI_USAGE_INDICATOR_CONFIG``
+  3. ``~/.config/ai-usage-indicator/config.toml``
+  4. legacy ``$SHBR_CONFIG``
+  5. ``~/.config/shbr/config.toml`` (compatibility path; existing state is kept)
+  6. built-in defaults (generic, public sources only)
 
 A config file is *merged over* the defaults at the source level, so a private
 deployment only needs to add/enable the extra sources it wants without
@@ -17,7 +19,10 @@ import tomllib
 from pathlib import Path
 
 DEFAULT_STATE_DIR = "~/.local/state/shbr"
-DEFAULT_CONFIG_PATH = "~/.config/shbr/config.toml"
+CANONICAL_CONFIG_PATH = "~/.config/ai-usage-indicator/config.toml"
+LEGACY_CONFIG_PATH = "~/.config/shbr/config.toml"
+# Public compatibility for callers that used this constant as the write target.
+DEFAULT_CONFIG_PATH = CANONICAL_CONFIG_PATH
 CLAUDE_MEMORY_GLOB = "~/.claude/projects/*/memory/*.md"
 
 # Generic, ships-to-anyone defaults. No vendor-private runtime paths here.
@@ -79,8 +84,18 @@ def _merge(base: dict, over: dict) -> dict:
 
 
 def load(explicit: str | None = None) -> Config:
-    path = explicit or os.environ.get("SHBR_CONFIG") or DEFAULT_CONFIG_PATH
-    p = _expand(path)
+    if explicit:
+        p = _expand(explicit)
+    elif os.environ.get("AI_USAGE_INDICATOR_CONFIG"):
+        p = _expand(os.environ["AI_USAGE_INDICATOR_CONFIG"])
+    elif _expand(CANONICAL_CONFIG_PATH).exists():
+        p = _expand(CANONICAL_CONFIG_PATH)
+    elif os.environ.get("SHBR_CONFIG"):
+        p = _expand(os.environ["SHBR_CONFIG"])
+    elif _expand(LEGACY_CONFIG_PATH).exists():
+        p = _expand(LEGACY_CONFIG_PATH)
+    else:
+        p = _expand(CANONICAL_CONFIG_PATH)
     if p.exists():
         with p.open("rb") as fh:
             file_data = tomllib.load(fh)

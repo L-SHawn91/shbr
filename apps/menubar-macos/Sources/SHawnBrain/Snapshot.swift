@@ -128,6 +128,7 @@ struct AgentMeter: Decodable {
         var all: Double?
         var quotas: [Quota]?
         var plan: String?
+        var accounts: [UsageAccount]?
     }
 
     struct Quota: Decodable, Identifiable {
@@ -170,6 +171,46 @@ struct AgentMeter: Decodable {
                 resetsAtEpoch = f.date(from: s)?.timeIntervalSince1970
             }
         }
+    }
+}
+
+// Canonical multi-account hierarchy. Every metric keeps its own unit; the UI
+// deliberately renders sources independently rather than inventing a total
+// across tokens, requests, currency, and percentages.
+struct UsageAccount: Decodable, Identifiable {
+    var id: String
+    var label: String
+    var metricSources: [UsageMetricSource]
+
+    enum CodingKeys: String, CodingKey {
+        case id, label
+        case metricSources = "metric_sources"
+    }
+}
+
+struct UsageMetricSource: Decodable, Identifiable {
+    var id: String
+    var kind: String
+    var tier: String
+    var status: String?
+    var metrics: [UsageMetric]
+}
+
+struct UsageMetric: Decodable, Identifiable {
+    var id: String
+    var label: String?
+    var unit: String
+    var window: String?
+    var used: Double?
+    var limit: Double?
+    var remaining: Double?
+    var usedPercent: Double?
+    var remainingPercent: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case id, label, unit, window, used, limit, remaining
+        case usedPercent = "used_percent"
+        case remainingPercent = "remaining_percent"
     }
 }
 

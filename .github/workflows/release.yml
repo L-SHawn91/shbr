@@ -21,7 +21,9 @@ jobs:
           VERSION=$(python -c 'import pathlib,re; text=pathlib.Path("src/shbr/__init__.py").read_text(); print(re.search(r"^__version__ = \"([^\"]+)\"", text, re.M).group(1))')
           test "$GITHUB_REF_NAME" = "v$VERSION"
       - run: python -m build --wheel
+      - name: Create wheel checksum
+        run: sha256sum dist/*.whl > SHA256SUMS
       - name: Create release with wheel
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.whl --generate-notes --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" dist/*.whl SHA256SUMS --generate-notes --verify-tag

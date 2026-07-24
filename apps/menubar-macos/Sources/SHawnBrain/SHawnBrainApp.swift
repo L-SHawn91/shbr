@@ -1,12 +1,12 @@
 import SwiftUI
 
-// SHawn Brain — native macOS menu-bar app.
+// AI Usage Indicator — native macOS menu-bar app.
 //
 // A self-contained menu-bar-resident app (no SwiftBar / no host). The menu-bar
 // item shows the always-on glance; clicking opens a rich panel rendering the
 // read-only `shbr` core (host resources, per-agent usage + quota, sessions).
 @main
-struct SHawnBrainApp: App {
+struct AIUsageIndicatorApp: App {
     @StateObject private var model = BrainModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
@@ -35,7 +35,7 @@ struct SHawnBrainApp: App {
         // 자유롭게 옮길 수 있는 독립 창. MenuBarExtra 팝오버는 macOS가 메뉴바
         // 아이콘에 고정해 드래그로 이동할 수 없으므로, 위치 이동이 필요하면
         // 푸터의 ‘창으로 열기’로 이 창을 띄운다. contentSize로 내용 크기에 맞춘다.
-        Window("SHawn Brain", id: "panel") {
+        Window("AI Usage Indicator", id: "panel") {
             ContentView(model: model)
                 .onAppear { model.panelAppeared() }
                 .onDisappear { model.panelDisappeared() }
@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guardOffDuplicateInstances()
     }
 
-    /// 두 개 이상의 SHawnBrain 프로세스가 동시에 떠서 UserDefaults/메뉴바
+    /// 두 개 이상의 AIUsageIndicator 프로세스가 동시에 떠서 UserDefaults/메뉴바
     /// 슬롯 경합으로 hang이 나는 것을 막는다. 같은 번들 ID를 가진 다른
     /// running 인스턴스가 있으면 이(새) 프로세스가 종료된다.
     private func guardOffDuplicateInstances() {

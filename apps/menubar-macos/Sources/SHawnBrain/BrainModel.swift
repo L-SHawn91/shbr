@@ -148,7 +148,7 @@ final class BrainModel: ObservableObject {
 
     private func scheduleAnimTick() {
         animTimer = Timer.scheduledTimer(withTimeInterval: animInterval, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.animStep() }
+            Task { @MainActor [weak self] in self?.animStep() }
         }
     }
 
@@ -175,7 +175,7 @@ final class BrainModel: ObservableObject {
         timer?.invalidate()
         let interval = TimeInterval(max(1, refreshSeconds))
         let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor [weak self] in self?.refresh() }
         }
         t.tolerance = interval * 0.2
         timer = t
@@ -282,10 +282,13 @@ final class BrainModel: ObservableObject {
     // 초기화 비용을 물었다(앱이 무거웠던 주범). 대신 **시작 시 한 번만** 로그인 셸로
     // shbr의 절대경로와 PATH를 알아내 캐시하고, 이후엔 바이너리를 직접 exec한다
     // (RunCat처럼 셸 없이 가볍게). 경로 해석이 실패하면 기존 로그인 셸로 폴백.
-    private nonisolated static let bootstrap: (shbr: String, path: String)? = {
+    private nonisolated static let bootstrap: (cli: String, path: String)? = {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        proc.arguments = ["-lc", #"printf '%s\n%s' "$(command -v shbr)" "$PATH""#]
+        proc.arguments = [
+            "-lc",
+            #"printf '%s\n%s' "$(command -v ai-usage-indicator || command -v shbr)" "$PATH""#,
+        ]
         let out = Pipe()
         proc.standardOutput = out
         proc.standardError = Pipe()
@@ -296,9 +299,9 @@ final class BrainModel: ObservableObject {
               let text = String(data: data, encoding: .utf8) else { return nil }
         let lines = text.components(separatedBy: "\n")
         guard lines.count >= 2 else { return nil }
-        let shbr = lines[0].trimmingCharacters(in: .whitespacesAndNewlines)
+        let cli = lines[0].trimmingCharacters(in: .whitespacesAndNewlines)
         let path = lines[1].trimmingCharacters(in: .whitespacesAndNewlines)
-        return shbr.isEmpty ? nil : (shbr, path)
+        return cli.isEmpty ? nil : (cli, path)
     }()
 
     // 위 캐시로 실행할 Process를 만든다. 캐시가 있으면 바이너리 직접 exec하고,
@@ -307,14 +310,18 @@ final class BrainModel: ObservableObject {
     private nonisolated static func makeProc(_ args: [String]) -> Process {
         let proc = Process()
         if let b = bootstrap {
-            proc.executableURL = URL(fileURLWithPath: b.shbr)
+            proc.executableURL = URL(fileURLWithPath: b.cli)
             proc.arguments = args
             var env = ProcessInfo.processInfo.environment
             env["PATH"] = b.path
             proc.environment = env
         } else {
             proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            proc.arguments = ["-lc", (["shbr"] + args).joined(separator: " ")]
+            proc.arguments = [
+                "-lc",
+                #"exec "$(command -v ai-usage-indicator || command -v shbr)" "$@""#,
+                "--",
+            ] + args
         }
         return proc
     }
@@ -356,20 +363,20 @@ final class BrainModel: ObservableObject {
         do {
             try proc.run()
         } catch {
-            return .failure("could not launch shbr: \(error.localizedDescription)")
+            return .failure("could not launch AI Usage Indicator: \(error.localizedDescription)")
         }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let errData = err.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
         if proc.terminationStatus != 0 {
             let msg = String(data: errData, encoding: .utf8) ?? ""
-            return .failure("shbr exited \(proc.terminationStatus): \(msg.trimmingCharacters(in: .whitespacesAndNewlines))")
+            return .failure("AI Usage Indicator exited \(proc.terminationStatus): \(msg.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
         do {
             let snap = try JSONDecoder().decode(Snapshot.self, from: data)
             return .success(snap)
         } catch {
-            return .failure("could not parse shbr output: \(error)")
+            return .failure("could not parse AI Usage Indicator output: \(error)")
         }
     }
 }
@@ -382,6 +389,12 @@ enum Fmt {
         if v >= 1_000_000 { return String(format: "%.1fM", v / 1_000_000) }
         if v >= 1_000 { return String(format: "%.1fk", v / 1_000) }
         return String(Int(v))
+    }
+
+    static func number(_ v: Double) -> String {
+        if v.rounded() == v { return String(Int(v)) }
+        let text = String(format: "%.2f", v)
+        return text.replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
     }
 
     static func bytes(_ v: Double?) -> String {

@@ -288,7 +288,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             BrainMarkLive(model: model, size: 30)
             VStack(alignment: .leading, spacing: 0) {
-                Text("SHawn Brain").font(.headline)
+                Text("AI Usage Indicator").font(.headline)
                 HStack(spacing: 4) {
                     Circle().fill(model.error == nil ? Color.green : Color.orange)
                         .frame(width: 6, height: 6)
@@ -491,6 +491,10 @@ struct ContentView: View {
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Capsule().fill(Color.secondary.opacity(0.12)))
                     }
+                    if let accounts = p.accounts, !accounts.isEmpty {
+                        Text("\(accounts.count) accounts")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
                     if !live, let s = p.status {
                         Text(s).font(.caption2).foregroundStyle(.secondary)
                             .padding(.horizontal, 5).padding(.vertical, 1)
@@ -656,6 +660,14 @@ struct ContentView: View {
                             Spacer()
                         }
                     }
+                    if let accounts = p.accounts, !accounts.isEmpty {
+                        sectionTitle("ACCOUNTS")
+                        VStack(spacing: 8) {
+                            ForEach(accounts) { account in
+                                accountCard(account)
+                            }
+                        }
+                    }
                     // token breakdown
                     sectionTitle("TOKENS")
                     card(padding: 11) {
@@ -730,6 +742,60 @@ struct ContentView: View {
             Text(v != nil && v! > 0 ? Fmt.tok(v!) : "–")
                 .font(.callout.monospacedDigit().weight(.medium))
         }
+    }
+
+    private func accountCard(_ account: UsageAccount) -> some View {
+        card(padding: 11) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(account.label).font(.subheadline.weight(.medium))
+                    if account.label != account.id {
+                        Text(account.id).font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                }
+                ForEach(account.metricSources) { source in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text(source.kind.replacingOccurrences(of: "-", with: " "))
+                                .font(.caption.weight(.medium))
+                            Text(source.tier.uppercased())
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            Spacer()
+                        }
+                        ForEach(source.metrics) { metric in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(metric.label ?? metric.window ?? metric.id)
+                                    .font(.caption2).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                                Spacer()
+                                Text(metricValue(metric))
+                                    .font(.caption2.monospacedDigit().weight(.medium))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func metricValue(_ metric: UsageMetric) -> String {
+        if let value = metric.remainingPercent {
+            return "\(Int(value.rounded()))% left"
+        }
+        if let remaining = metric.remaining, let limit = metric.limit {
+            return "\(Fmt.number(remaining)) / \(Fmt.number(limit)) \(metric.unit)"
+        }
+        if let remaining = metric.remaining {
+            return "\(Fmt.number(remaining)) \(metric.unit) left"
+        }
+        if let used = metric.used {
+            return metric.unit == "tokens"
+                ? Fmt.tok(used)
+                : "\(Fmt.number(used)) \(metric.unit)"
+        }
+        return "–"
     }
 
     private func quotaDetailRow(_ q: AgentMeter.Quota) -> some View {
@@ -1046,7 +1112,7 @@ struct StatBar: View {
 // MARK: - 환경설정 (Settings) — 숀 스타일
 
 // 좌측 브랜드 레일 + 우측 카드형 콘텐츠. 표준 TabView 대신 커스텀 내비게이션으로
-// SHawn Brain 정체성(🧠·둥근 폰트·그라디언트·상태 점)을 설정 창까지 이어붙였다.
+// AI Usage Indicator 정체성(🧠·둥근 폰트·그라디언트·상태 점)을 설정 창까지 이어붙였다.
 // refreshSeconds/labelShow*는 model 바인딩으로 두어 didSet이 즉시 반영된다.
 struct SettingsView: View {
     @ObservedObject var model: BrainModel
@@ -1082,7 +1148,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 BrainMarkLive(model: model, size: 34)
-                Text("SHawn Brain")
+                Text("AI Usage Indicator")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
                 Text("로컬 관측 레이어")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -1421,7 +1487,7 @@ private struct LaunchAtLoginToggle: View {
             .toggleStyle(.switch)
             .font(.system(size: 13))
             Text(failure.map { "자동 실행을 적용하지 못했습니다: \($0)" }
-                 ?? "로그인할 때 SHawn Brain을 메뉴바에 자동으로 띄웁니다.")
+                 ?? "로그인할 때 AI Usage Indicator를 메뉴바에 자동으로 띄웁니다.")
                 .font(.caption)
                 .foregroundStyle(failure == nil ? Color.secondary : Color.red)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1696,13 +1762,13 @@ private struct AboutPane: View {
     }
 
     var body: some View {
-        PaneTitle(title: "정보", subtitle: "SHawn Brain이 무엇을, 어떻게 다루는지.")
+        PaneTitle(title: "정보", subtitle: "AI Usage Indicator가 무엇을, 어떻게 다루는지.")
 
         Card {
             HStack(spacing: 14) {
                 BrainMarkLive(model: model, size: 46)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("SHawn Brain")
+                    Text("AI Usage Indicator")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
                     Text("로컬 AI 에이전트 도구를 관측·집계하는 로컬 우선 레이어")
                         .font(.caption).foregroundStyle(.secondary)

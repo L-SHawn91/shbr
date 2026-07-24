@@ -32,7 +32,7 @@ enum BrainIcon {
     }
 }
 
-// "SHawn Brain" 헤더/브랜드 자리의 🧠 이모지를 대체하는 풀컬러 두뇌 글리프.
+// "AI Usage Indicator" 헤더/브랜드 자리의 🧠 이모지를 대체하는 풀컬러 두뇌 글리프.
 // 앱 대표 아이콘과 동일한 100% Peak 프레임(BrainFrames.images.last)을 쓴다.
 struct BrainMark: View {
     var size: CGFloat

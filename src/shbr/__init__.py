@@ -1,6 +1,7 @@
-"""shbr — local-first, zero-instrumentation observability for CLI AI agents.
+"""AI Usage Indicator — local-first usage observability for AI tools.
 
-Codename SHBr. A read-only observer: it watches on-disk agent state — token /
+The ``shbr`` module and command remain compatibility aliases. This read-only
+observer watches on-disk agent state — token /
 quota usage, persistent-memory operations, and sessions — and never intervenes.
 
 Design contract for this package:
@@ -12,5 +13,6 @@ Design contract for this package:
   * Output is metadata only — never prompt or memory content.
 """
 
-APP_NAME = "SHBr"
+APP_NAME = "AI Usage Indicator"
+CLI_NAME = "ai-usage-indicator"
 __version__ = "0.1.0"

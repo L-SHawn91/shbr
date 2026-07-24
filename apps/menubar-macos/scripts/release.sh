@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Developer ID sign → notarize → staple → DMG for SHawnBrain (App Store 밖 직접 배포).
+# Developer ID sign → notarize → staple → DMG for AI Usage Indicator (App Store 밖 직접 배포).
 #
 # ── 최초 1회만, 직접(대화형) 해둘 것 ────────────────────────────────────────
 #   1) Apple Developer Program 가입 ($99/년) — developer.apple.com
@@ -20,7 +20,7 @@ set -euo pipefail
 HERE="${0:A:h}"
 ROOT="${HERE:h}"
 REPO_ROOT="${ROOT:h:h}"
-APP="SHawnBrain"
+APP="AIUsageIndicator"
 VERSION="$(awk -F '"' '/^__version__ = / {print $2; exit}' "$REPO_ROOT/src/shbr/__init__.py")"
 [[ -n "$VERSION" ]] || { echo "!! could not resolve shbr version"; exit 1; }
 DIST="$ROOT/dist"

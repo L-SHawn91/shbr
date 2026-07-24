@@ -32,7 +32,7 @@ class TrustBoundaryTests(unittest.TestCase):
         self.assertEqual(
             experimental,
             {"claude", "codex", "gemini", "antigravity", "copilot",
-             "cursor_quota", "ollama_cloud"},
+             "cursor_quota", "browser_pilot"},
         )
 
     def test_example_config_uses_real_connector_registry_keys(self):

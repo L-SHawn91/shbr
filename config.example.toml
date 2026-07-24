@@ -1,4 +1,5 @@
-# shbr configuration — copy to ~/.config/shbr/config.toml (or point $SHBR_CONFIG at it).
+# AI Usage Indicator configuration — the legacy ~/.config/shbr/config.toml path
+# remains supported. $AI_USAGE_INDICATOR_CONFIG takes precedence over $SHBR_CONFIG.
 #
 # Anything omitted here inherits the built-in defaults, which enable only the
 # generic, public sources:
@@ -48,8 +49,8 @@ enabled = true
 # To force a specific command that prints a °C number, set temp_cmd:
 # temp_cmd = "smctemp -c"       # or "istats cpu temp --value-only", "sensors -u" (Linux)
 #
-# Menu-bar glance (macOS): the native SHawn Brain app (apps/menubar-macos) shows
-# shbr in the menu bar (host meter + per-agent usage in one line) via `shbr menubar --json`.
+# Menu-bar glance (macOS): the AI Usage Indicator app (apps/menubar-macos) shows
+# the host meter and usage via `ai-usage-indicator menubar --json`.
 # `shbr menubar` without --json also emits SwiftBar/xbar plugin text as a dev
 # scaffold. See the "Menu bar" section of the README.
 
@@ -100,10 +101,20 @@ enabled = true
 # [sources.openrouter]
 # enabled = true
 
-# experimental — ollama.com (scrapes /settings HTML with browser session cookie)
-# Ollama Cloud's API has no usage endpoint (github.com/ollama/ollama#12532).
-# Provide the __Secure-session cookie value from a logged-in browser, or set
-# the OLLAMA_SESSION_COOKIE env var. The cookie lasts weeks to months.
-# [sources.ollama_cloud]
+# experimental — sanitized loopback browser bridge only (127.0.0.1)
+# This fallback never reads cookies, browser databases, raw DOM/HTML, or CDP.
+# Each provider/account requires a distinct pre-created profile directory with
+# mode 0700 and a short-lived local bridge that emits quota metadata only.
+# The bridge capability-token file must be owned by the current user, mode 0600,
+# and contain one random 16–256 character token. It is not a provider credential.
+# No provider-specific browser observer ships yet; keep this disabled until a
+# separately reviewed helper implements the documented sanitized payload.
+# [sources.browser_pilot]
 # enabled = true
-# session_cookie = ""
+# provider = "claude"
+# account_id = "work"
+# account_label = "Work"
+# profile_dir = "~/.local/state/shbr/browser-profiles/claude-work"
+# bridge_host = "127.0.0.1"
+# bridge_port = 8765
+# bridge_token_file = "~/.local/state/shbr/browser-profiles/claude-work.token"

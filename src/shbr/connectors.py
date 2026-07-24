@@ -49,6 +49,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 
 # Network calls are bounded hard: a connector must never make the menu bar hang.
@@ -71,7 +72,19 @@ class Connector:
     cred_paths: tuple = ()
 
     def __init__(self, cfg: dict):
-        self.cfg = cfg
+        self.cfg = dict(cfg)
+        self.account_id = str(cfg.get("account_id") or cfg.get("id") or "default")
+        self.account_label = str(
+            cfg.get("account_label") or cfg.get("label") or self.account_id
+        )
+        self.source_id = str(cfg.get("source_id") or "provider-api")
+        self.source_kind = str(cfg.get("source_kind") or "provider-api")
+        self.connector_key = self.name
+
+    @property
+    def cache_key(self) -> str:
+        """Account-scoped key; prevents one login overwriting another's cache."""
+        return f"{self.connector_key}:{self.account_id}"
 
     @classmethod
     def available(cls, cfg: dict) -> bool:
@@ -86,7 +99,7 @@ class Connector:
         paths = cfg.get("cred_paths") or cls.cred_paths
         return any(os.path.exists(os.path.expanduser(p)) for p in paths)
 
-    def fetch(self):
+    def fetch(self) -> dict | None:
         """Return a provider dict (usage/quota) or ``None``. Never raises."""
         return None
 
@@ -1266,168 +1279,74 @@ class OpenrouterConnector(Connector):
                 "quotas": [q]}
 
 
-class OllamaCloudConnector(Connector):
-    """Ollama Cloud remaining-quota reader — the session/weekly usage % the
-    ``ollama.com/settings`` page shows, which no local file or API endpoint
-    contains.
+class BrowserSessionConnector(Connector):
+    """Optional account-isolated browser fallback via a sanitized loopback bridge.
 
-    EXPERIMENTAL tier: Ollama Cloud's API (``/v1/*``, ``/api/*``) has no usage or
-    quota endpoint — confirmed by upstream issue #12532 and the ``UserResponse``
-    struct (``api/types.go``) which carries only ``plan``, not usage. The *only*
-    source of session/weekly usage % is the server-rendered HTML at
-    ``https://ollama.com/settings``, authenticated by the browser session cookie
-    ``__Secure-session`` (not the ``OLLAMA_API_KEY``). Every community tool
-    (ollama-usage, OllamaDash, aimo, llamaherd, Ollama_Orbit) uses this exact
-    method.
 
-    The user provides the cookie value via config (``[sources.ollama_cloud]
-    enabled = true, session_cookie = "..."``) or the ``OLLAMA_SESSION_COOKIE``
-    env var. The connector GETs the settings page with that cookie, parses the
-    ``[data-usage-meter]`` elements (session %, weekly %, resets-in text), and
-    returns them as quota dicts shaped like every other connector's output.
-
-    The plan name (free/pro/max) comes from ``/api/me`` using the same cookie —
-    that endpoint returns identity + plan but no quota, so it is enrichment
-    only. Fail-silent throughout: a missing/expired cookie returns ``None`` and
-    the row simply does not appear.
+    The connector never reads cookies, browser databases, DOM/HTML, or CDP.  A
+    separately controlled browser-side observer may expose quota metadata only on
+    127.0.0.1; :mod:`shbr.browser` validates the profile and payload boundary.
     """
 
-    name = "ollama_cloud"
+    name = "browser_pilot"
     tier = "experimental"
-    hosts = ("ollama.com",)
-    # No cred_paths: the credential is a user-supplied cookie string, not a file.
-    cred_paths = ()
+    hosts = ("127.0.0.1",)
 
-    SETTINGS_URL = "https://ollama.com/settings"
-    ME_URL = "https://ollama.com/api/me"
-    _ENV_COOKIE = "OLLAMA_SESSION_COOKIE"
+    def __init__(self, cfg: dict):
+        super().__init__(cfg)
+        from .browser import BrowserBridgeClient, BrowserProfile, read_bridge_token
+
+        self.name = str(cfg.get("provider") or "")
+        self.source_id = "browser-session"
+        self.source_kind = "browser-session"
+        self.profile = BrowserProfile(
+            self.name,
+            self.account_id,
+            Path(os.path.expanduser(str(cfg.get("profile_dir") or ""))),
+        )
+        token = read_bridge_token(str(cfg.get("bridge_token_file") or ""))
+        self.client = BrowserBridgeClient(
+            str(cfg.get("bridge_host") or "127.0.0.1"),
+            int(cfg.get("bridge_port") or 0),
+            self.name,
+            self.account_id,
+            token,
+        )
 
     @classmethod
     def available(cls, cfg: dict) -> bool:
-        """Enabled AND a session cookie is configured (config or env var)."""
         if not cfg.get("enabled"):
             return False
-        return bool(cfg.get("session_cookie")
-                    or os.environ.get(cls._ENV_COOKIE))
-
-    def _cookie(self) -> str | None:
-        """The session cookie value from config or env var."""
-        c = self.cfg.get("session_cookie")
-        if c:
-            return c
-        return os.environ.get(self._ENV_COOKIE)
-
-    @staticmethod
-    def _get_html(url: str, cookie: str, timeout: float = HTTP_TIMEOUT):
-        """GET a URL with a session cookie, return the response body or None."""
-        headers = {
-            "Cookie": f"__Secure-session={cookie}",
-            "Accept": "text/html,application/xhtml+xml",
-            "User-Agent": "shbr-connector",
-        }
-        req = urllib.request.Request(url, headers=headers, method="GET")
+        if not cfg.get("provider") or not cfg.get("account_id"):
+            return False
+        if (not cfg.get("profile_dir") or not cfg.get("bridge_port")
+                or not cfg.get("bridge_token_file")):
+            return False
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                if resp.status != 200:
-                    return None
-                return resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, OSError, ValueError):
-            return None
+            connector = cls(cfg)
+            connector.profile.validate()
+        except (OSError, TypeError, ValueError):
+            return False
+        return True
 
-    @staticmethod
-    def _get_json_cookie(url: str, cookie: str, timeout: float = HTTP_TIMEOUT):
-        """GET a JSON endpoint with a session cookie, return parsed dict or None."""
-        headers = {
-            "Cookie": f"__Secure-session={cookie}",
-            "Accept": "application/json",
-            "User-Agent": "shbr-connector",
-        }
-        req = urllib.request.Request(url, headers=headers, method="GET")
+    def fetch(self) -> dict | None:
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                if resp.status != 200:
-                    return None
-                return json.loads(resp.read())
-        except (urllib.error.URLError, OSError, ValueError):
+            self.profile.validate()
+            payload = self.client.fetch()
+        except (OSError, ValueError):
             return None
-
-    @staticmethod
-    def _parse_usage_meters(html: str) -> list:
-        """Parse session/weekly usage % from the settings page HTML.
-
-        Uses ``[data-usage-meter]`` elements (the most stable selector, per
-        OllamaDash) and falls back to text pattern matching for
-        ``Session usage`` / ``Weekly usage`` labels with percentage values.
-        Returns a list of quota dicts.
-        """
-        if not html:
-            return []
-        out = []
-
-        # Primary: parse [data-usage-meter] data attributes.
-        # Each meter has data-percent (used %) and a data-window attribute.
-        for m in re.finditer(
-            r'data-usage-meter[^>]*\bdata-percent="([\d.]+)"'
-            r'(?:[^>]*\bdata-window="([^"]*)")?'
-            r'(?:[^>]*\bdata-reset="([^"]*)")?',
-            html,
-        ):
-            used = float(m.group(1))
-            window = m.group(2) or ""
-            reset = m.group(3) or ""
-            q = {
-                "id": window or "usage",
-                "window": window or "?",
-                "usedPercent": round(used, 1),
-                "remainingPercent": round(100 - used, 1),
-                "resets_at": reset or None,
-            }
-            out.append(q)
-
-        if out:
-            return out
-
-        # Fallback: text pattern matching (session / weekly labels).
-        for label, qid, window in (("Session usage", "session", "5h"),
-                                   ("Weekly usage", "weekly", "7d")):
-            idx = html.find(label)
-            if idx < 0:
-                continue
-            # Grab the nearest percentage after the label.
-            tail = html[idx:idx + 400]
-            pm = re.search(r"(\d+(?:\.\d+)?)\s*%", tail)
-            if not pm:
-                continue
-            used = float(pm.group(1))
-            # Look for a "Resets in ..." nearby.
-            rm = re.search(
-                r"Resets?\s+in\s+([^<\"]{3,60})", tail, re.IGNORECASE)
-            out.append({
-                "id": qid,
-                "window": window,
-                "usedPercent": round(used, 1),
-                "remainingPercent": round(100 - used, 1),
-                "resets_at": rm.group(1).strip() if rm else None,
-            })
-        return out
-
-    def fetch(self):
-        cookie = self._cookie()
-        if not cookie:
-            return None
-        html = self._get_html(self.SETTINGS_URL, cookie)
-        if not html:
-            return None
-        quotas = self._parse_usage_meters(html)
-        if not quotas:
-            return None
-        # Enrich with plan name from /api/me (best-effort, non-fatal).
-        me = self._get_json_cookie(self.ME_URL, cookie)
-        plan = None
-        if isinstance(me, dict):
-            plan = me.get("plan")
-        return {"name": self.name, "status": "live", "tier": self.tier,
-                "plan": plan, "quotas": quotas}
+        return {
+            "name": self.name,
+            "status": payload.get("status") or "live",
+            "tier": self.tier,
+            "plan": payload.get("plan"),
+            "observed_at": payload.get("observed_at"),
+            "account_id": self.account_id,
+            "account_label": self.account_label,
+            "source_id": self.source_id,
+            "source_kind": self.source_kind,
+            "quotas": payload.get("quotas") or [],
+        }
 
 
 # Per-provider connectors are registered here as recon confirms an endpoint and
@@ -1453,11 +1372,10 @@ CONNECTOR_REGISTRY: dict = {
     # the gateway credit/spend a local disk read cannot see. Distinct key from
     # the on-by-default local ``opencode`` token-ledger source.
     "openrouter": OpenrouterConnector,
-    # OFF by default; opt-in via ``[sources.ollama_cloud] enabled = true,
-    # session_cookie = "..."`` (or OLLAMA_SESSION_COOKIE env var). EXPERIMENTAL
-    # tier — scrapes ollama.com/settings HTML with the browser session cookie
-    # because Ollama Cloud's API has no usage endpoint (upstream issue #12532).
-    "ollama_cloud": OllamaCloudConnector,
+    # Generic, OFF-by-default browser fallback. It accepts only sanitized quota
+    # metadata from a short-lived 127.0.0.1 bridge and an account-specific 0700
+    # browser profile; it never reads cookies, browser storage, DOM, or CDP.
+    "browser_pilot": BrowserSessionConnector,
 }
 
 
@@ -1479,7 +1397,43 @@ def build_connectors(cfg) -> list:
         # (e.g. ``cursor_quota`` → row ``cursor``).
         if getattr(cls, "name", name) in hidden:
             continue
-        if not cls.available(cc):
-            continue
-        out.append(cls(cc))
+        account_rows = cc.get("accounts")
+        if isinstance(account_rows, list):
+            base = {key: value for key, value in cc.items() if key != "accounts"}
+            seen = set()
+            candidates = []
+            for index, row in enumerate(account_rows):
+                if not isinstance(row, dict):
+                    continue
+                account_cfg = dict(base)
+                account_cfg.update(row)
+                account_cfg.setdefault("enabled", bool(cc.get("enabled")))
+                account_id = str(
+                    account_cfg.get("account_id")
+                    or account_cfg.get("id")
+                    or f"account-{index + 1}"
+                )
+                if account_id in seen:
+                    continue
+                seen.add(account_id)
+                account_cfg["account_id"] = account_id
+                candidates.append(account_cfg)
+        else:
+            candidates = [cc]
+
+        for account_cfg in candidates:
+            if not cls.available(account_cfg):
+                continue
+            # Availability checks and construction may read mutable local
+            # credential/profile state.  If that state changes between the two
+            # calls, preserve the connector contract: skip it rather than make
+            # every CLI command fail during context initialization.
+            try:
+                connector = cls(account_cfg)
+            except (OSError, TypeError, ValueError):
+                continue
+            if connector.name in hidden:
+                continue
+            connector.connector_key = name
+            out.append(connector)
     return out
